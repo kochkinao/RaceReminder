@@ -1,10 +1,9 @@
 """
 Scheduler jobs:
 
-  cache_warmup    — every hour: refresh L1+L2, prewarm banners
+  cache_warmup    — every hour: refresh L1+L2
   notifications   — every hour: send reminders
   weekly_digest   — every Monday: send weekly digest
-  banner_cleanup  — every Sunday: remove banners older than 7 days
 
 Optimizations vs naive:
   - One get_all_subscriptions() call for all users (was N calls)
@@ -22,14 +21,13 @@ from typing import Any
 
 import pytz
 from aiogram import Bot
-from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import utils
 from config import NOTIFICATION_OFFSETS, NOTIFICATION_WINDOW
 from database import Database
 from utils.cache import MemoryCache
-from utils.images import clear_old_banners, prewarm_banners
 
 log = logging.getLogger(__name__)
 
@@ -55,11 +53,6 @@ def make_scheduler(bot: Bot, db: Database, mem: MemoryCache) -> AsyncIOScheduler
         lambda: _weekly_digest_job(bot, db, mem),
         trigger="cron", day_of_week="mon", hour="*", minute=10,
         id="weekly_digest", replace_existing=True,
-    )
-    scheduler.add_job(
-        lambda: _banner_cleanup_job(),
-        trigger="cron", day_of_week="sun", hour=3, minute=0,
-        id="banner_cleanup", replace_existing=True,
     )
     return scheduler
 
@@ -122,31 +115,12 @@ async def _send(
     session: Row,
     kb:      InlineKeyboardMarkup,
 ) -> None:
-    from utils.formatters import fmt_time
-    loc      = session.get("location", {})
-    loc_name = loc.get("alternateName") or loc.get("name", "")
-    country  = loc.get("country", "")
-    loc_str  = ", ".join(p for p in (loc_name, country) if p)
-    start_ts = session.get("start", 0)
-
-    img = utils.session_banner(
-        session,
-        time_str=fmt_time(start_ts, "UTC") if start_ts else "",
-        location_str=loc_str,
-    )
     try:
-        if img:
-            await bot.send_photo(
-                chat_id,
-                BufferedInputFile(img, filename="race.jpg"),
-                caption=text, parse_mode="HTML", reply_markup=kb,
-            )
-        else:
-            await bot.send_message(
-                chat_id, text,
-                parse_mode="HTML", reply_markup=kb,
-                disable_web_page_preview=True,
-            )
+        await bot.send_message(
+            chat_id, text,
+            parse_mode="HTML", reply_markup=kb,
+            disable_web_page_preview=True,
+        )
     except Exception as exc:
         log.error("Send failed → %d: %s", chat_id, exc)
         raise
@@ -156,17 +130,6 @@ async def _send(
 
 async def _warmup_job(db: Database, mem: MemoryCache) -> None:
     await utils.warm_up(mem, db)
-
-    # Prewarm banners for sessions fetched this hour
-    from utils.windows import week_window
-    w_start, w_end = week_window()
-    try:
-        sessions  = await utils.get_sessions(mem, db, w_start, w_end)
-        generated = prewarm_banners(sessions)
-        if generated:
-            log.info("Prewarmed %d new banners", generated)
-    except Exception as exc:
-        log.error("Banner prewarm failed: %s", exc)
 
 
 # ── Notification job ──────────────────────────────────────────────────────────
@@ -309,7 +272,6 @@ async def _weekly_digest_job(bot: Bot, db: Database, mem: MemoryCache) -> None:
     sent_set  = await db.get_all_sent_notifications()
 
     series_idx, class_idx = _build_session_index(all_sessions)
-    digest_banner          = utils.digest_banner(label)  # generated once, reused
 
     successfully_marked: list[tuple[int, str, str]] = []
 
@@ -340,14 +302,6 @@ async def _weekly_digest_job(bot: Bot, db: Database, mem: MemoryCache) -> None:
         show_no_bc = bool(user.get("show_no_broadcast", 1))
 
         try:
-            if digest_banner:
-                await bot.send_photo(
-                    chat_id,
-                    BufferedInputFile(digest_banner, filename="week.jpg"),
-                    caption=f"📅 <b>Гонки на неделю</b>\n{label}",
-                    parse_mode="HTML",
-                )
-
             for msg in utils.build_digest(
                 sessions, bc_map, {},
                 user_tz=user["timezone"],
@@ -369,10 +323,3 @@ async def _weekly_digest_job(bot: Bot, db: Database, mem: MemoryCache) -> None:
 
     await db.mark_notified_batch(successfully_marked)
     log.info("Weekly digest job done. Sent: %d", len(successfully_marked))
-
-
-# ── Banner cleanup job ────────────────────────────────────────────────────────
-
-async def _banner_cleanup_job() -> None:
-    removed = clear_old_banners(keep_days=7)
-    log.info("Banner cleanup: removed %d old files", removed)

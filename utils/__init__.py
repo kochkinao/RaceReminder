@@ -13,12 +13,11 @@ from .formatters import (
     session_card, build_digest, notification_text,
     fmt_datetime, fmt_time, fmt_duration, is_qualifying,
 )
-from .images import session_banner, digest_banner
 from .kb import (
     SubToggleCD, KbShowCD, FavCD, RemindCD,
     ProfileToggleCD, LangToggleCD, QualToggleCD,
     main_menu, subs_main, back_to_menu, back_to_subs,
-    timezone_picker, series_list, class_list,
+    timezone_picker, series_list, class_list, week_pager, today_pager,
     session_actions, profile_menu, lang_picker, kb_menu,
 )
 from .knowledge_base import SERIES_KB, get_series_info, format_card
@@ -31,11 +30,10 @@ __all__ = [
     "today_window", "week_window", "notify_window", "history_window", "week_label",
     "session_card", "build_digest", "notification_text",
     "fmt_datetime", "fmt_time", "fmt_duration", "is_qualifying",
-    "session_banner", "digest_banner",
     "SubToggleCD", "KbShowCD", "FavCD", "RemindCD",
     "ProfileToggleCD", "LangToggleCD", "QualToggleCD",
     "main_menu", "subs_main", "back_to_menu", "back_to_subs",
-    "timezone_picker", "series_list", "class_list",
+    "timezone_picker", "series_list", "class_list", "week_pager", "today_pager",
     "session_actions", "profile_menu", "lang_picker", "kb_menu",
     "SERIES_KB", "get_series_info", "format_card",
 ]

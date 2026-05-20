@@ -480,7 +480,6 @@ async def get_live_timings(session_id: str) -> list[ApiObject]:
 
 async def warm_up(mem: MemoryCache, db: Database) -> None:
     from utils.windows import today_window, week_window, notify_window
-    from utils.images import prewarm_banners
 
     log.info("Cache warm-up started")
     try:
@@ -488,9 +487,9 @@ async def warm_up(mem: MemoryCache, db: Database) -> None:
         w_start, w_end = week_window()
         n_start, n_end = notify_window()
 
-        today_sessions = await get_sessions(mem, db, t_start, t_end)
+        await get_sessions(mem, db, t_start, t_end)
         await get_broadcasts(mem, db, t_start)
-        week_sessions  = await get_sessions(mem, db, w_start, w_end)
+        await get_sessions(mem, db, w_start, w_end)
         await get_broadcasts(mem, db, w_start)
         await get_sessions(mem, db, n_start, n_end)
         await get_all_series(mem, db)
@@ -498,13 +497,6 @@ async def warm_up(mem: MemoryCache, db: Database) -> None:
 
         evicted = mem.evict_expired()
         log.info("Cache warm-up done. L1: %d entries (%d evicted)", mem.size(), evicted)
-
-        # Prewarm banners for week sessions (superset of today)
-        # Done after cache fill so it doesn't block the critical path
-        all_sessions = {s["id"]: s for s in today_sessions + week_sessions}
-        generated    = prewarm_banners(list(all_sessions.values()))
-        if generated:
-            log.info("Prewarmed %d new session banners", generated)
 
     except Exception as exc:
         log.error("Warm-up failed: %s", exc)

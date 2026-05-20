@@ -4,7 +4,7 @@ import logging
 import pytz
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 import utils
 from database import Database
@@ -12,6 +12,8 @@ from utils.cache import MemoryCache
 
 log = logging.getLogger(__name__)
 router = Router()
+_TODAY_HEADER = "📅 <b>Гонки на сегодня</b>"
+_WEEK_HEADER = "📆 <b>Гонки на неделю</b>"
 
 
 async def _subs_ids(db: Database, chat_id: int) -> tuple[set[str], set[str]]:
@@ -22,47 +24,23 @@ async def _subs_ids(db: Database, chat_id: int) -> tuple[set[str], set[str]]:
     )
 
 
-async def _send_session_card(
-    target:  Message,
-    session: dict,
-    bc_map:  dict,
-    user:    dict,
-    db:      Database,
-) -> None:
-    sid       = session.get("id", "")
-    start_ts  = session.get("start", 0)
-    loc       = session.get("location", {})
-    langs     = json.loads(user.get("preferred_langs", '["English"]'))
-    show_no_bc = bool(user.get("show_no_broadcast", 1))
-
-    card = utils.session_card(
-        session,
-        broadcasts=bc_map.get(sid, []),
-        live_timings=[],
-        user_tz=user["timezone"],
-        user_langs=langs,
-        show_no_bc=show_no_bc,
-    )
-    if card is None:
-        return
-
-    is_fav = await db.is_favorite(target.chat.id, sid)
-    kb     = utils.session_actions(sid, is_fav)
-    loc_str = ", ".join(p for p in (loc.get("name"), loc.get("country")) if p)
-    img     = utils.session_banner(
-        session,
-        time_str=utils.fmt_time(start_ts, user["timezone"]) if start_ts else "",
-        location_str=loc_str,
-    )
-    if img:
-        await target.answer_photo(
-            BufferedInputFile(img, filename="race.jpg"),
-            caption=card, parse_mode="HTML", reply_markup=kb,
-        )
+def _paginate_digest(
+    messages: list[str],
+    page: int,
+    kind: str,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    total = len(messages)
+    safe_page = max(0, min(page, total - 1))
+    if total > 1:
+        kb = utils.week_pager(safe_page, total) if kind == "week" else utils.today_pager(safe_page, total)
     else:
-        await target.answer(
-            card, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
-        )
+        kb = utils.back_to_menu()
+    return messages[safe_page], kb
+
+
+def _is_empty_digest(messages: list[str], header: str) -> bool:
+    empty_text = (header + "\n\n" if header else "") + "😴 Нет гонок по вашим подпискам."
+    return len(messages) == 1 and messages[0] == empty_text
 
 
 # ── /today ────────────────────────────────────────────────────────────────────
@@ -74,9 +52,23 @@ async def cmd_today(message: Message, db: Database, mem: MemoryCache) -> None:
 @router.callback_query(F.data == "today")
 async def cb_today(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
     await callback.answer("Загружаю...")
-    await _handle_today(callback.message, db, mem)
+    await _handle_today(callback.message, db, mem, as_edit=True)
 
-async def _handle_today(target: Message, db: Database, mem: MemoryCache) -> None:
+
+@router.callback_query(F.data.startswith("today_page:"))
+async def cb_today_page(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
+    await callback.answer()
+    page = int(callback.data.split(":", 1)[1])
+    await _handle_today(callback.message, db, mem, page=page, as_edit=True)
+
+
+async def _handle_today(
+    target: Message,
+    db: Database,
+    mem: MemoryCache,
+    page: int = 0,
+    as_edit: bool = False,
+) -> None:
     user          = await db.get_user(target.chat.id)
     t_start, t_end = utils.today_window()
     series_ids, class_ids = await _subs_ids(db, target.chat.id)
@@ -90,22 +82,47 @@ async def _handle_today(target: Message, db: Database, mem: MemoryCache) -> None
     tz        = pytz.timezone(user["timezone"])
     now_local = datetime.now(tz)
     date_label = now_local.strftime("%d %B %Y")
+    header = f"{_TODAY_HEADER} — {date_label}"
+    messages = utils.build_digest(
+        sessions, bc_map, {},
+        user_tz=user["timezone"],
+        user_langs=json.loads(user.get("preferred_langs", '["English"]')),
+        show_no_bc=bool(user.get("show_no_broadcast", 1)),
+        header=header,
+    )
 
-    img = utils.digest_banner(date_label)
-    if img:
-        await target.answer_photo(
-            BufferedInputFile(img, filename="today.jpg"),
-            caption=f"📅 <b>Гонки на {date_label}</b>", parse_mode="HTML",
+    if _is_empty_digest(messages, header):
+        text = messages[0]
+        if as_edit:
+            await target.edit_text(
+                text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
+        await target.answer(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
         )
-    else:
-        await target.answer(f"📅 <b>Гонки на {date_label}</b>", parse_mode="HTML")
-
-    if not sessions:
-        await target.answer("😴 Сегодня нет гонок по вашим подпискам.")
         return
 
-    for s in sessions:
-        await _send_session_card(target, s, bc_map, user, db)
+    text, kb = _paginate_digest(messages, page, "today")
+    if as_edit:
+        await target.edit_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=kb,
+        )
+        return
+
+    await target.answer(
+        text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=kb,
+    )
 
 
 # ── /week ─────────────────────────────────────────────────────────────────────
@@ -117,9 +134,23 @@ async def cmd_week(message: Message, db: Database, mem: MemoryCache) -> None:
 @router.callback_query(F.data == "week")
 async def cb_week(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
     await callback.answer("Загружаю...")
-    await _handle_week(callback.message, db, mem)
+    await _handle_week(callback.message, db, mem, as_edit=True)
 
-async def _handle_week(target: Message, db: Database, mem: MemoryCache) -> None:
+
+@router.callback_query(F.data.startswith("week_page:"))
+async def cb_week_page(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
+    await callback.answer()
+    page = int(callback.data.split(":", 1)[1])
+    await _handle_week(callback.message, db, mem, page=page, as_edit=True)
+
+
+async def _handle_week(
+    target: Message,
+    db: Database,
+    mem: MemoryCache,
+    page: int = 0,
+    as_edit: bool = False,
+) -> None:
     user = await db.get_user(target.chat.id)
     w_start, w_end = utils.week_window()
     series_ids, class_ids = await _subs_ids(db, target.chat.id)
@@ -131,21 +162,48 @@ async def _handle_week(target: Message, db: Database, mem: MemoryCache) -> None:
     langs    = json.loads(user.get("preferred_langs", '["English"]'))
     label    = utils.week_label(w_start, w_end)
 
-    img = utils.digest_banner(label)
-    if img:
-        await target.answer_photo(
-            BufferedInputFile(img, filename="week.jpg"),
-            caption=f"📆 <b>Гонки на неделю</b>\n{label}", parse_mode="HTML",
-        )
-
-    for msg in utils.build_digest(
+    header = f"{_WEEK_HEADER} — {label}"
+    messages = utils.build_digest(
         sessions, bc_map, {},
         user_tz=user["timezone"],
         user_langs=langs,
         show_no_bc=bool(user.get("show_no_broadcast", 1)),
-        header=f"📆 <b>Гонки на неделю</b> — {label}",
-    ):
-        await target.answer(msg, parse_mode="HTML", disable_web_page_preview=True)
+        header=header,
+    )
+
+    if _is_empty_digest(messages, header):
+        text = messages[0]
+        if as_edit:
+            await target.edit_text(
+                text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            return
+        await target.answer(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        return
+
+    text, kb = _paginate_digest(messages, page, "week")
+
+    if as_edit:
+        await target.edit_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=kb,
+        )
+        return
+
+    await target.answer(
+        text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=kb,
+    )
 
 
 # ── /history ──────────────────────────────────────────────────────────────────

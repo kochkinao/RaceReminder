@@ -115,7 +115,7 @@ async def cb_tz(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("set_tz:"))
+@router.callback_query(F.data.startswith("tz:"))
 async def cb_set_tz(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
     tz = callback.data.split(":", 1)[1]
     if tz == "manual":
@@ -142,6 +142,7 @@ async def msg_tz_manual(message: Message, state: FSMContext, db: Database) -> No
     await db.update_user(message.chat.id, timezone=tz_input)
     await state.clear()
     await message.answer(f"✅ Часовой пояс: <code>{tz_input}</code>", parse_mode="HTML")
+    await _show_profile(message, db)
 
 
 # ── Digest time ───────────────────────────────────────────────────────────────

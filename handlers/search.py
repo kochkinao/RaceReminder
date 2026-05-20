@@ -105,6 +105,48 @@ async def _send_series_card(message: Message, series: dict, db: Database) -> Non
     )
 
 
+def _kb_sub_callback(series_id: str) -> str:
+    return f"kb_sub:{series_id}"
+
+
+async def _build_kb_card(
+    user_id: int,
+    name: str,
+    db: Database,
+    mem: MemoryCache,
+) -> tuple[str, InlineKeyboardMarkup]:
+    info = utils.SERIES_KB.get(name)
+    if not info:
+        raise ValueError("Серия не найдена")
+
+    text = utils.format_card(name, info)
+    similar = info.get("similar", [])
+    btns: list[list[InlineKeyboardButton]] = []
+
+    similar_row = [
+        InlineKeyboardButton(text=f"→ {s}", callback_data=utils.KbShowCD(name=s).pack())
+        for s in similar[:3]
+        if s in utils.SERIES_KB
+    ]
+    if similar_row:
+        btns.append(similar_row)
+
+    all_series = await utils.get_all_series(mem, db)
+    matched = next(
+        (s for s in all_series if name.lower() in s.get("name", "").lower()), None
+    )
+    if matched:
+        is_sub = await db.is_subscribed(user_id, "series", matched["id"])
+        sub_text = "❌ Отписаться" if is_sub else "✅ Подписаться"
+        btns.append([InlineKeyboardButton(
+            text=sub_text,
+            callback_data=_kb_sub_callback(matched["id"]),
+        )])
+
+    btns.append([InlineKeyboardButton(text="◀️ База знаний", callback_data="kb_menu")])
+    return text, InlineKeyboardMarkup(inline_keyboard=btns)
+
+
 # ── /kb — knowledge base ──────────────────────────────────────────────────────
 
 @router.message(Command("kb"))
@@ -134,41 +176,41 @@ async def cb_kb_show(
     mem: MemoryCache,
 ) -> None:
     name = callback_data.name
-    info = utils.SERIES_KB.get(name)
-    if not info:
+    if name not in utils.SERIES_KB:
         await callback.answer("Серия не найдена")
         return
-
-    text    = utils.format_card(name, info)
-    similar = info.get("similar", [])
-
-    btns: list[list[InlineKeyboardButton]] = []
-
-    similar_row = [
-        InlineKeyboardButton(text=f"→ {s}", callback_data=utils.KbShowCD(name=s).pack())
-        for s in similar[:3]                           # type: ignore[union-attr]
-        if s in utils.SERIES_KB
-    ]
-    if similar_row:
-        btns.append(similar_row)
-
-    all_series = await utils.get_all_series(mem, db)
-    matched    = next(
-        (s for s in all_series if name.lower() in s.get("name", "").lower()), None
-    )
-    if matched:
-        is_sub   = await db.is_subscribed(callback.from_user.id, "series", matched["id"])
-        sub_text = "❌ Отписаться" if is_sub else "✅ Подписаться"
-        btns.append([InlineKeyboardButton(
-            text=sub_text,
-            callback_data=utils.SubToggleCD(type="series", ref_id=matched["id"], page=0).pack(),
-        )])
-
-    btns.append([InlineKeyboardButton(text="◀️ База знаний", callback_data="kb_menu")])
+    text, kb = await _build_kb_card(callback.from_user.id, name, db, mem)
 
     await callback.message.edit_text(
         text, parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
+        reply_markup=kb,
         disable_web_page_preview=True,
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("kb_sub:"))
+async def cb_kb_sub_toggle(
+    callback: CallbackQuery,
+    db: Database,
+    mem: MemoryCache,
+) -> None:
+    series_id = callback.data.split(":", 1)[1]
+    all_series = await utils.get_all_series(mem, db)
+    series = next((s for s in all_series if s["id"] == series_id), None)
+    if not series:
+        await callback.answer("Серия не найдена")
+        return
+
+    if await db.is_subscribed(callback.from_user.id, "series", series_id):
+        await db.remove_subscription(callback.from_user.id, "series", series_id)
+        notice = f"❌ Отписались: {series['name']}"
+    else:
+        await db.add_subscription(
+            callback.from_user.id, "series", series_id, series.get("name", "")
+        )
+        notice = f"✅ Подписались: {series['name']}"
+
+    _, kb = await _build_kb_card(callback.from_user.id, series.get("name", ""), db, mem)
+    await callback.message.edit_reply_markup(reply_markup=kb)
+    await callback.answer(notice)

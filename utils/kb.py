@@ -84,21 +84,58 @@ def back_to_subs() -> InlineKeyboardMarkup:
     ]])
 
 
+def week_pager(page: int, total: int) -> InlineKeyboardMarkup:
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"week_page:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{total}", callback_data="noop"))
+    if page + 1 < total:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"week_page:{page+1}"))
+    return InlineKeyboardMarkup(inline_keyboard=[
+        nav,
+        [InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")],
+    ])
+
+
+def today_pager(page: int, total: int) -> InlineKeyboardMarkup:
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"today_page:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{total}", callback_data="noop"))
+    if page + 1 < total:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"today_page:{page+1}"))
+    return InlineKeyboardMarkup(inline_keyboard=[
+        nav,
+        [InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")],
+    ])
+
+
 # ── Dynamic keyboards ─────────────────────────────────────────────────────────
 
 def timezone_picker(page: int = 0) -> InlineKeyboardMarkup:
     per = 8
     zones = POPULAR_TIMEZONES[page * per: (page + 1) * per]
-    btns = [[InlineKeyboardButton(text=f"🕐 {tz}", callback_data=f"tz:{tz}")] for tz in zones]
-    nav: list[InlineKeyboardButton] = []
+    
+    # Группируем кнопки часовых поясов в строки по 2 столбца
+    rows = []
+    for i in range(0, len(zones), 2):
+        row = [InlineKeyboardButton(text=f"🕐 {tz}", callback_data=f"tz:{tz}") 
+               for tz in zones[i:i+2]]
+        rows.append(row)
+    
+    # Навигационные кнопки (◀️ ▶️)
+    nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="◀️", callback_data=f"tz_page:{page-1}"))
     if (page + 1) * per < len(POPULAR_TIMEZONES):
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"tz_page:{page+1}"))
     if nav:
-        btns.append(nav)
-    btns.append([InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="tz:manual")])
-    return InlineKeyboardMarkup(inline_keyboard=btns)
+        rows.append(nav)
+    
+    # Кнопка ручного ввода
+    rows.append([InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="tz:manual")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def series_list(
@@ -137,12 +174,18 @@ def class_list(
     subscribed_ids: set[str],
 ) -> InlineKeyboardMarkup:
     btns = []
+    row: list[InlineKeyboardButton] = []
     for vc in all_classes:
         check = "✅ " if vc["id"] in subscribed_ids else ""
-        btns.append([InlineKeyboardButton(
+        row.append(InlineKeyboardButton(
             text=f"{check}{vc.get('name','?')}",
             callback_data=SubToggleCD(type="vehicle_class", ref_id=vc["id"]).pack(),
-        )])
+        ))
+        if len(row) == 2:
+            btns.append(row)
+            row = []
+    if row:
+        btns.append(row)
     btns.append([InlineKeyboardButton(text="◀️ Назад", callback_data="subs_menu")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
@@ -215,12 +258,18 @@ _LANG_OPTIONS: list[tuple[str, str]] = [
 
 def lang_picker(current: list[str]) -> InlineKeyboardMarkup:
     btns = []
+    row: list[InlineKeyboardButton] = []
     for label, lid in _LANG_OPTIONS:
         check = "✅ " if lid in current else ""
-        btns.append([InlineKeyboardButton(
+        row.append(InlineKeyboardButton(
             text=f"{check}{label}",
             callback_data=LangToggleCD(lang_id=lid).pack(),
-        )])
+        ))
+        if len(row) == 2:
+            btns.append(row)
+            row = []
+    if row:
+        btns.append(row)
     btns.append([InlineKeyboardButton(text="✅ Готово", callback_data="profile_menu")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 

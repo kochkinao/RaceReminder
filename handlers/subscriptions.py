@@ -41,16 +41,24 @@ async def cb_my_subs(callback: CallbackQuery, db: Database) -> None:
     series_subs = [s for s in subs if s["type"] == "series"]
     class_subs  = [s for s in subs if s["type"] == "vehicle_class"]
 
-    lines = ["📋 <b>Ваши подписки:</b>\n"]
+    parts = ["📋 <b>Ваши подписки:</b>\n"]
+    
     if series_subs:
-        lines.append("<b>Серии:</b>")
-        lines.extend(f"  • {s['ref_name']}" for s in series_subs)
+        parts.append("<b>Серии:</b>")
+        parts.extend(f"  • {s['ref_name']}" for s in series_subs)
+    
     if class_subs:
-        lines.append("\n<b>Классы:</b>")
-        lines.extend(f"  • {s['ref_name']}" for s in class_subs)
-
+        # Добавляем пустую строку-разделитель только если уже есть серии
+        if series_subs:
+            parts.append("")  # пустая строка для отступа между блоками
+        parts.append("<b>Классы:</b>")
+        parts.extend(f"  • {s['ref_name']}" for s in class_subs)
+    
+    # Объединяем через \n – теперь каждый элемент – отдельная строка без лишних \n внутри
+    text = "\n".join(parts)
+    
     await callback.message.edit_text(
-        "\n".join(lines), parse_mode="HTML", reply_markup=utils.back_to_subs()
+        text, parse_mode="HTML", reply_markup=utils.back_to_subs()
     )
     await callback.answer()
 

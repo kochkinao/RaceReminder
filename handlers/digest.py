@@ -1,0 +1,218 @@
+import json
+import logging
+
+import pytz
+from aiogram import F, Router
+from aiogram.filters import Command
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
+
+import utils
+from database import Database
+from utils.cache import MemoryCache
+
+log = logging.getLogger(__name__)
+router = Router()
+
+
+async def _subs_ids(db: Database, chat_id: int) -> tuple[set[str], set[str]]:
+    subs = await db.get_subscriptions(chat_id)
+    return (
+        {s["ref_id"] for s in subs if s["type"] == "series"},
+        {s["ref_id"] for s in subs if s["type"] == "vehicle_class"},
+    )
+
+
+async def _send_session_card(
+    target:  Message,
+    session: dict,
+    bc_map:  dict,
+    user:    dict,
+    db:      Database,
+) -> None:
+    sid       = session.get("id", "")
+    start_ts  = session.get("start", 0)
+    loc       = session.get("location", {})
+    langs     = json.loads(user.get("preferred_langs", '["English"]'))
+    show_no_bc = bool(user.get("show_no_broadcast", 1))
+
+    card = utils.session_card(
+        session,
+        broadcasts=bc_map.get(sid, []),
+        live_timings=[],
+        user_tz=user["timezone"],
+        user_langs=langs,
+        show_no_bc=show_no_bc,
+    )
+    if card is None:
+        return
+
+    is_fav = await db.is_favorite(target.chat.id, sid)
+    kb     = utils.session_actions(sid, is_fav)
+    loc_str = ", ".join(p for p in (loc.get("name"), loc.get("country")) if p)
+    img     = utils.session_banner(
+        session,
+        time_str=utils.fmt_time(start_ts, user["timezone"]) if start_ts else "",
+        location_str=loc_str,
+    )
+    if img:
+        await target.answer_photo(
+            BufferedInputFile(img, filename="race.jpg"),
+            caption=card, parse_mode="HTML", reply_markup=kb,
+        )
+    else:
+        await target.answer(
+            card, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
+        )
+
+
+# ── /today ────────────────────────────────────────────────────────────────────
+
+@router.message(Command("today"))
+async def cmd_today(message: Message, db: Database, mem: MemoryCache) -> None:
+    await _handle_today(message, db, mem)
+
+@router.callback_query(F.data == "today")
+async def cb_today(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
+    await callback.answer("Загружаю...")
+    await _handle_today(callback.message, db, mem)
+
+async def _handle_today(target: Message, db: Database, mem: MemoryCache) -> None:
+    user          = await db.get_user(target.chat.id)
+    t_start, t_end = utils.today_window()
+    series_ids, class_ids = await _subs_ids(db, target.chat.id)
+
+    all_sessions   = await utils.get_sessions(mem, db, t_start, t_end)
+    all_broadcasts = await utils.get_broadcasts(mem, db, t_start)
+    sessions = utils.filter_sessions_for_user(all_sessions, series_ids, class_ids)
+    bc_map   = utils.broadcasts_by_session(all_broadcasts)
+
+    from datetime import datetime, timezone
+    tz        = pytz.timezone(user["timezone"])
+    now_local = datetime.now(tz)
+    date_label = now_local.strftime("%d %B %Y")
+
+    img = utils.digest_banner(date_label)
+    if img:
+        await target.answer_photo(
+            BufferedInputFile(img, filename="today.jpg"),
+            caption=f"📅 <b>Гонки на {date_label}</b>", parse_mode="HTML",
+        )
+    else:
+        await target.answer(f"📅 <b>Гонки на {date_label}</b>", parse_mode="HTML")
+
+    if not sessions:
+        await target.answer("😴 Сегодня нет гонок по вашим подпискам.")
+        return
+
+    for s in sessions:
+        await _send_session_card(target, s, bc_map, user, db)
+
+
+# ── /week ─────────────────────────────────────────────────────────────────────
+
+@router.message(Command("week"))
+async def cmd_week(message: Message, db: Database, mem: MemoryCache) -> None:
+    await _handle_week(message, db, mem)
+
+@router.callback_query(F.data == "week")
+async def cb_week(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
+    await callback.answer("Загружаю...")
+    await _handle_week(callback.message, db, mem)
+
+async def _handle_week(target: Message, db: Database, mem: MemoryCache) -> None:
+    user = await db.get_user(target.chat.id)
+    w_start, w_end = utils.week_window()
+    series_ids, class_ids = await _subs_ids(db, target.chat.id)
+
+    all_sessions   = await utils.get_sessions(mem, db, w_start, w_end)
+    all_broadcasts = await utils.get_broadcasts(mem, db, w_start)
+    sessions = utils.filter_sessions_for_user(all_sessions, series_ids, class_ids)
+    bc_map   = utils.broadcasts_by_session(all_broadcasts)
+    langs    = json.loads(user.get("preferred_langs", '["English"]'))
+    label    = utils.week_label(w_start, w_end)
+
+    img = utils.digest_banner(label)
+    if img:
+        await target.answer_photo(
+            BufferedInputFile(img, filename="week.jpg"),
+            caption=f"📆 <b>Гонки на неделю</b>\n{label}", parse_mode="HTML",
+        )
+
+    for msg in utils.build_digest(
+        sessions, bc_map, {},
+        user_tz=user["timezone"],
+        user_langs=langs,
+        show_no_bc=bool(user.get("show_no_broadcast", 1)),
+        header=f"📆 <b>Гонки на неделю</b> — {label}",
+    ):
+        await target.answer(msg, parse_mode="HTML", disable_web_page_preview=True)
+
+
+# ── /history ──────────────────────────────────────────────────────────────────
+
+@router.message(Command("history"))
+async def cmd_history(message: Message, db: Database, mem: MemoryCache) -> None:
+    user = await db.get_user(message.chat.id)
+    h_start, h_end = utils.history_window()
+    series_ids, class_ids = await _subs_ids(db, message.chat.id)
+
+    all_sessions   = await utils.get_sessions(mem, db, h_start, h_end)
+    all_broadcasts = await utils.get_broadcasts(mem, db, h_start)
+    sessions = utils.filter_sessions_for_user(all_sessions, series_ids, class_ids)
+    bc_map   = utils.broadcasts_by_session(all_broadcasts)
+    langs    = json.loads(user.get("preferred_langs", '["English"]'))
+
+    if not sessions:
+        await message.answer("📭 Нет прошедших гонок за последние 7 дней.")
+        return
+
+    await message.answer("📖 <b>Прошедшие гонки (7 дней)</b>", parse_mode="HTML")
+    for s in sessions[-10:]:
+        card = utils.session_card(
+            s, bc_map.get(s.get("id", ""), []), [],
+            user_tz=user["timezone"], user_langs=langs, compact=True,
+        )
+        if card:
+            await message.answer(card, parse_mode="HTML", disable_web_page_preview=True)
+
+
+# ── Favorites ─────────────────────────────────────────────────────────────────
+
+@router.callback_query(utils.FavCD.filter())
+async def cb_fav(
+    callback: CallbackQuery,
+    callback_data: utils.FavCD,
+    db: Database,
+) -> None:
+    sid = callback_data.session_id
+    match callback_data.action:
+        case "add":
+            await db.add_favorite(callback.from_user.id, sid)
+            await callback.answer("❤️ Добавлено в избранное!")
+        case "remove":
+            await db.remove_favorite(callback.from_user.id, sid)
+            await callback.answer("💔 Убрано из избранного.")
+    is_fav = await db.is_favorite(callback.from_user.id, sid)
+    await callback.message.edit_reply_markup(reply_markup=utils.session_actions(sid, is_fav))
+
+
+@router.callback_query(F.data == "favorites_list")
+async def cb_favorites_list(callback: CallbackQuery, db: Database) -> None:
+    favs = await db.get_favorites(callback.from_user.id)
+    if not favs:
+        await callback.answer("У вас нет избранных гонок.", show_alert=True)
+        return
+    lines = ["❤️ <b>Избранное:</b>\n"]
+    lines.extend(f"  • {f['session_name'] or f['session_id']}" for f in favs)
+    await callback.message.answer("\n".join(lines), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(utils.RemindCD.filter())
+async def cb_remind(
+    callback: CallbackQuery,
+    callback_data: utils.RemindCD,
+    db: Database,
+) -> None:
+    await db.add_favorite(callback.from_user.id, callback_data.session_id)
+    await callback.answer("🔔 Напомню за час до старта!")

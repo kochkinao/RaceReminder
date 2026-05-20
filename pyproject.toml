@@ -1,0 +1,18 @@
+[project]
+name = "raceday-bot"
+version = "2.0.0"
+description = "Telegram bot for RaceDay.watch racing calendar"
+requires-python = ">=3.14"
+dependencies = [
+    "aiogram==3.28.2",
+    "aiosqlite==0.22.1",
+    "apscheduler==3.11.2",
+    "aiohttp==3.13.5",
+    "pillow==12.1.1",
+    "python-dotenv==1.0.1",
+    "pytz==2026.2",
+    "aiogram-calendar==0.6.0",
+]
+
+[project.scripts]
+raceday-bot = "main:main_sync"

@@ -142,6 +142,36 @@ _FIELD_MAP = {
 }
 
 
+def _matched_subscriptions(session: Row, subs: list[Row]) -> list[Row]:
+    series_ids = {sr["id"] for sr in session.get("series", [])}
+    class_ids = {
+        vc["id"]
+        for sr in session.get("series", [])
+        for vc in sr.get("vehicleClasses", [])
+    }
+    return [
+        sub for sub in subs
+        if (sub["type"] == "series" and sub["ref_id"] in series_ids)
+        or (sub["type"] == "vehicle_class" and sub["ref_id"] in class_ids)
+    ]
+
+
+def _allows_session_type(session: Row, subs: list[Row]) -> bool:
+    category = utils.session_category(session.get("name", ""))
+    if category == "race":
+        return True
+
+    matched = _matched_subscriptions(session, subs)
+    if not matched:
+        return False
+
+    if category == "qualifying":
+        return any(sub.get("qualifying_notify", sub.get("qual_notify", 1)) for sub in matched)
+    if category == "practice":
+        return any(sub.get("practice_notify", sub.get("qual_notify", 1)) for sub in matched)
+    return True
+
+
 async def _notifications_job(bot: Bot, db: Database, mem: MemoryCache) -> None:
     log.info("Notification job started")
     t0  = time.monotonic()
@@ -184,7 +214,6 @@ async def _notifications_job(bot: Bot, db: Database, mem: MemoryCache) -> None:
             if not start_ts:
                 continue
 
-            is_qual = utils.is_qualifying(session.get("name", ""))
             diff    = start_ts - now
 
             for notif_type, offset in NOTIFICATION_OFFSETS.items():
@@ -195,15 +224,8 @@ async def _notifications_job(bot: Bot, db: Database, mem: MemoryCache) -> None:
                 if (chat_id, sid, notif_type) in sent_set:
                     continue
 
-                # Per-series qual_notify check
-                if is_qual:
-                    skip = any(
-                        s["ref_id"] in {sr["id"] for sr in session.get("series", [])}
-                        and not s.get("qual_notify", 1)
-                        for s in subs
-                    )
-                    if skip:
-                        continue
+                if not _allows_session_type(session, subs):
+                    continue
 
                 to_send.append((chat_id, session, notif_type, bc_map.get(sid, []), user_langs))
                 to_mark.append((chat_id, sid, notif_type))
@@ -302,18 +324,24 @@ async def _weekly_digest_job(bot: Bot, db: Database, mem: MemoryCache) -> None:
         show_no_bc = bool(user.get("show_no_broadcast", 1))
 
         try:
-            for msg in utils.build_digest(
+            messages = utils.build_digest(
                 sessions, bc_map, {},
                 user_tz=user["timezone"],
                 user_langs=langs,
                 show_no_bc=show_no_bc,
-                header=f"📅 <b>Гонки на неделю</b> — {label}",
-            ):
-                await bot.send_message(
-                    chat_id, msg,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
+                header=f"📆 <b>Гонки на неделю</b> — {label}",
+            )
+            reply_markup = (
+                utils.week_pager(0, len(messages))
+                if len(messages) > 1
+                else utils.back_to_menu()
+            )
+            await bot.send_message(
+                chat_id, messages[0],
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=reply_markup,
+            )
 
             successfully_marked.append((chat_id, "weekly", week_key))
             sent_set.add((chat_id, "weekly", week_key))

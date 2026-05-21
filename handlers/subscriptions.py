@@ -14,6 +14,20 @@ log = logging.getLogger(__name__)
 router = Router()
 
 
+def _sub_kind_label(type_: str) -> str:
+    return "Серия" if type_ == "series" else "Класс"
+
+
+def _notify_text(sub: dict) -> str:
+    return (
+        f"🔔 <b>Негоночные уведомления</b>\n\n"
+        f"{_sub_kind_label(sub['type'])}: <b>{sub['ref_name']}</b>\n"
+        f"Квалификации: {'вкл' if sub.get('qualifying_notify', 1) else 'выкл'}\n"
+        f"Практики и тесты: {'вкл' if sub.get('practice_notify', 1) else 'выкл'}\n\n"
+        f"Уведомления о самих гонках остаются включёнными."
+    )
+
+
 @router.message(Command("subscriptions"))
 async def cmd_subscriptions(message: Message) -> None:
     await message.answer(
@@ -61,6 +75,91 @@ async def cb_my_subs(callback: CallbackQuery, db: Database) -> None:
         text, parse_mode="HTML", reply_markup=utils.back_to_subs()
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "subs:notify")
+async def cb_subs_notify(callback: CallbackQuery, db: Database) -> None:
+    subs = await db.get_subscriptions(callback.from_user.id)
+    if not subs:
+        await callback.answer("У вас нет подписок.", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        "🔔 <b>Квалификации и практики</b>\n"
+        "Выберите подписку, для которой хотите настроить негоночные уведомления.",
+        parse_mode="HTML",
+        reply_markup=utils.subscriptions_notify_list(subs),
+    )
+    await callback.answer()
+
+
+@router.callback_query(utils.SubNotifyCD.filter(F.action == "open"))
+async def cb_sub_notify_open(
+    callback: CallbackQuery,
+    callback_data: utils.SubNotifyCD,
+    db: Database,
+) -> None:
+    subs = await db.get_subscriptions(callback.from_user.id)
+    sub = next(
+        (
+            s for s in subs
+            if s["type"] == callback_data.type and s["ref_id"] == callback_data.ref_id
+        ),
+        None,
+    )
+    if not sub:
+        await callback.answer("Подписка не найдена", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        _notify_text(sub),
+        parse_mode="HTML",
+        reply_markup=utils.subscription_notify_menu(sub),
+    )
+    await callback.answer()
+
+
+@router.callback_query(utils.SubNotifyCD.filter(F.action == "toggle"))
+async def cb_sub_notify_toggle(
+    callback: CallbackQuery,
+    callback_data: utils.SubNotifyCD,
+    db: Database,
+) -> None:
+    if callback_data.field not in {"qualifying_notify", "practice_notify"}:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+
+    subs = await db.get_subscriptions(callback.from_user.id)
+    sub = next(
+        (
+            s for s in subs
+            if s["type"] == callback_data.type and s["ref_id"] == callback_data.ref_id
+        ),
+        None,
+    )
+    if not sub:
+        await callback.answer("Подписка не найдена", show_alert=True)
+        return
+
+    new_value = 0 if sub.get(callback_data.field, 1) else 1
+    updates = {callback_data.field: new_value}
+    if callback_data.field == "qualifying_notify":
+        updates["qual_notify"] = new_value
+
+    await db.update_subscription(
+        callback.from_user.id,
+        callback_data.type,
+        callback_data.ref_id,
+        **updates,
+    )
+    sub.update(updates)
+
+    await callback.message.edit_text(
+        _notify_text(sub),
+        parse_mode="HTML",
+        reply_markup=utils.subscription_notify_menu(sub),
+    )
+    await callback.answer("Настройка обновлена")
 
 
 # ── Series browser ────────────────────────────────────────────────────────────

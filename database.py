@@ -87,6 +87,7 @@ class Database:
                 cached_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
         """)
+        await self._migrate_subscriptions_schema()
         await self._conn.commit()
         log.info("Database ready: %s", self.path)
 
@@ -120,6 +121,26 @@ class Database:
     async def _execute_many(self, sql: str, params_seq: list[tuple]) -> None:
         await self._db.executemany(sql, params_seq)
         await self._db.commit()
+
+    async def _migrate_subscriptions_schema(self) -> None:
+        rows = await self._fetchall("PRAGMA table_info(subscriptions)")
+        columns = {row["name"] for row in rows}
+
+        if "qualifying_notify" not in columns:
+            await self._db.execute(
+                "ALTER TABLE subscriptions ADD COLUMN qualifying_notify INTEGER NOT NULL DEFAULT 1"
+            )
+            await self._db.execute(
+                "UPDATE subscriptions SET qualifying_notify = qual_notify"
+            )
+
+        if "practice_notify" not in columns:
+            await self._db.execute(
+                "ALTER TABLE subscriptions ADD COLUMN practice_notify INTEGER NOT NULL DEFAULT 1"
+            )
+            await self._db.execute(
+                "UPDATE subscriptions SET practice_notify = qual_notify"
+            )
 
     # ── Users ─────────────────────────────────────────────────────────────────
 
@@ -183,6 +204,21 @@ class Database:
         await self._execute(
             "UPDATE subscriptions SET qual_notify=? WHERE chat_id=? AND ref_id=?",
             (int(value), chat_id, ref_id),
+        )
+
+    async def update_subscription(
+        self,
+        chat_id: int,
+        type_: str,
+        ref_id: str,
+        **fields: Any,
+    ) -> None:
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=?" for k in fields)
+        await self._execute(
+            f"UPDATE subscriptions SET {sets} WHERE chat_id=? AND type=? AND ref_id=?",
+            (*fields.values(), chat_id, type_, ref_id),
         )
 
     # ── Batch subscriptions (scheduler) ──────────────────────────────────────

@@ -28,9 +28,14 @@ _STATUS_LABELS: dict[int, str] = {
 }
 
 QUALIFYING_KEYWORDS = frozenset({
-    "quali", "qualifying", "квали",
+    "quali", "qualifying", "квали", "pole",
+    "hyperpole", "shootout",
+})
+
+PRACTICE_KEYWORDS = frozenset({
     "practice", "fp1", "fp2", "fp3",
-    "warm-up", "warmup", "free practice",
+    "fp4", "warm-up", "warmup", "free practice",
+    "test", "testing",
 })
 
 
@@ -54,6 +59,17 @@ def fmt_duration(minutes: int) -> str:
 def is_qualifying(name: str) -> bool:
     low = name.lower()
     return any(k in low for k in QUALIFYING_KEYWORDS)
+
+def is_practice(name: str) -> bool:
+    low = name.lower()
+    return any(k in low for k in PRACTICE_KEYWORDS)
+
+def session_category(name: str) -> str:
+    if is_qualifying(name):
+        return "qualifying"
+    if is_practice(name):
+        return "practice"
+    return "race"
 
 
 # ── Visual helpers ────────────────────────────────────────────────────────────

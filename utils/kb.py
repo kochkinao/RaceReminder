@@ -43,6 +43,13 @@ class QualToggleCD(CallbackData, prefix="qual"):
     value:  int
 
 
+class SubNotifyCD(CallbackData, prefix="subnotify"):
+    action: str
+    type: str
+    ref_id: str
+    field: str = ""
+
+
 # ── Static keyboards ──────────────────────────────────────────────────────────
 
 def main_menu() -> InlineKeyboardMarkup:
@@ -68,6 +75,7 @@ def subs_main() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🏎️ Серии",           callback_data="subs:series:0")],
         [InlineKeyboardButton(text="🏷️ Классы",          callback_data="subs:classes")],
         [InlineKeyboardButton(text="📋 Мои подписки",    callback_data="subs:mine")],
+        [InlineKeyboardButton(text="🔔 Квалы и практики", callback_data="subs:notify")],
         [InlineKeyboardButton(text="◀️ Меню",            callback_data="main_menu")],
     ])
 
@@ -284,3 +292,46 @@ def kb_menu(series_kb: dict) -> InlineKeyboardMarkup:
     ]
     btns.append([InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
+
+
+def subscriptions_notify_list(subs: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for sub in subs:
+        kind = "🏎️" if sub["type"] == "series" else "🏷️"
+        rows.append([InlineKeyboardButton(
+            text=f"{kind} {sub['ref_name']}",
+            callback_data=SubNotifyCD(
+                action="open",
+                type=sub["type"],
+                ref_id=sub["ref_id"],
+            ).pack(),
+        )])
+    rows.append([InlineKeyboardButton(text="◀️ Подписки", callback_data="subs_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def subscription_notify_menu(sub: dict) -> InlineKeyboardMarkup:
+    def icon(field: str) -> str:
+        return "✅" if sub.get(field, 1) else "❌"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{icon('qualifying_notify')} Квалификации",
+            callback_data=SubNotifyCD(
+                action="toggle",
+                type=sub["type"],
+                ref_id=sub["ref_id"],
+                field="qualifying_notify",
+            ).pack(),
+        )],
+        [InlineKeyboardButton(
+            text=f"{icon('practice_notify')} Практики и тесты",
+            callback_data=SubNotifyCD(
+                action="toggle",
+                type=sub["type"],
+                ref_id=sub["ref_id"],
+                field="practice_notify",
+            ).pack(),
+        )],
+        [InlineKeyboardButton(text="◀️ К списку", callback_data="subs:notify")],
+    ])

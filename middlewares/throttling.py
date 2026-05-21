@@ -27,7 +27,7 @@ class ThrottlingMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         user_id: int = event.from_user.id  # type: ignore[union-attr]
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         last = self._locks.get(user_id, 0.0)
 
         if now - last < self._rate:

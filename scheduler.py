@@ -47,22 +47,26 @@ def make_scheduler(
     scheduler = AsyncIOScheduler()
 
     scheduler.add_job(
-        lambda: _cache_warmup_job(mem, db),
+        _cache_warmup_job,
+        args=(mem, db),
         trigger="cron", hour="*", minute=0,
         id="cache_warmup", replace_existing=True, **grace,
     )
     scheduler.add_job(
-        lambda: _notifications_job(bot, db, mem, metrics),
+        _notifications_job,
+        args=(bot, db, mem, metrics),
         trigger="cron", hour="*", minute=5,
         id="notifications", replace_existing=True, **grace,
     )
     scheduler.add_job(
-        lambda: _weekly_digest_job(bot, db, mem, metrics),
+        _weekly_digest_job,
+        args=(bot, db, mem, metrics),
         trigger="cron", day_of_week="mon", hour=10, minute=0,
         id="weekly_digest", replace_existing=True, **grace,
     )
     scheduler.add_job(
-        lambda: _db_cleanup_job(db),
+        _db_cleanup_job,
+        args=(db,),
         trigger="cron", day_of_week="sun", hour=4, minute=0,
         id="db_cleanup", replace_existing=True, **grace,
     )

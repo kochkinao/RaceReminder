@@ -61,7 +61,7 @@ async def main() -> None:
     dp  = Dispatcher()
 
     # Wire bot into admin alert handler so errors go to Telegram
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     admin_handler.set_bot(bot, loop)
     log.info("Admin alert handler connected (IDs: %s)", ADMIN_IDS)
 

@@ -69,7 +69,10 @@ async def _handle_today(
     page: int = 0,
     as_edit: bool = False,
 ) -> None:
+<<<<<<< HEAD
     from datetime import datetime, timezone
+=======
+>>>>>>> 1f73ea54b9272d81ba0ddf95726a9bd145218694
     user          = await db.get_user(target.chat.id)
     t_start, t_end = utils.today_window()
     series_ids, class_ids = await _subs_ids(db, target.chat.id)
@@ -79,6 +82,7 @@ async def _handle_today(
     sessions = utils.filter_sessions_for_user(all_sessions, series_ids, class_ids)
     bc_map   = utils.broadcasts_by_session(all_broadcasts)
 
+<<<<<<< HEAD
     tz        = pytz.timezone(user["timezone"])
     now_local = datetime.now(tz)
 
@@ -92,6 +96,11 @@ async def _handle_today(
            datetime.fromtimestamp(s["start"], tz=timezone.utc).astimezone(tz).date() == today_local
     ]
 
+=======
+    from datetime import datetime, timezone
+    tz        = pytz.timezone(user["timezone"])
+    now_local = datetime.now(tz)
+>>>>>>> 1f73ea54b9272d81ba0ddf95726a9bd145218694
     date_label = now_local.strftime("%d %B %Y")
     header = f"{_TODAY_HEADER} — {date_label}"
     messages = utils.build_digest(
@@ -244,3 +253,47 @@ async def cmd_history(message: Message, db: Database, mem: MemoryCache) -> None:
         if card:
             await message.answer(card, parse_mode="HTML", disable_web_page_preview=True)
 
+<<<<<<< HEAD
+=======
+
+# ── Favorites ─────────────────────────────────────────────────────────────────
+
+@router.callback_query(utils.FavCD.filter())
+async def cb_fav(
+    callback: CallbackQuery,
+    callback_data: utils.FavCD,
+    db: Database,
+) -> None:
+    sid = callback_data.session_id
+    match callback_data.action:
+        case "add":
+            await db.add_favorite(callback.from_user.id, sid)
+            await callback.answer("❤️ Добавлено в избранное!")
+        case "remove":
+            await db.remove_favorite(callback.from_user.id, sid)
+            await callback.answer("💔 Убрано из избранного.")
+    is_fav = await db.is_favorite(callback.from_user.id, sid)
+    await callback.message.edit_reply_markup(reply_markup=utils.session_actions(sid, is_fav))
+
+
+@router.callback_query(F.data == "favorites_list")
+async def cb_favorites_list(callback: CallbackQuery, db: Database) -> None:
+    favs = await db.get_favorites(callback.from_user.id)
+    if not favs:
+        await callback.answer("У вас нет избранных гонок.", show_alert=True)
+        return
+    lines = ["❤️ <b>Избранное:</b>\n"]
+    lines.extend(f"  • {f['session_name'] or f['session_id']}" for f in favs)
+    await callback.message.answer("\n".join(lines), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(utils.RemindCD.filter())
+async def cb_remind(
+    callback: CallbackQuery,
+    callback_data: utils.RemindCD,
+    db: Database,
+) -> None:
+    await db.add_favorite(callback.from_user.id, callback_data.session_id)
+    await callback.answer("🔔 Напомню за час до старта!")
+>>>>>>> 1f73ea54b9272d81ba0ddf95726a9bd145218694

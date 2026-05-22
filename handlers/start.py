@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 import utils
-from config import DEFAULT_SERIES_NAMES, DEFAULT_VEHICLE_CLASS_NAMES
+from config import DEFAULT_VEHICLE_CLASS_NAMES
 from database import Database
 from utils.cache import MemoryCache
 from states import OnboardingStates
@@ -104,10 +104,10 @@ async def _finish_onboarding(
 
     subscribed: list[str] = []
     try:
-        for s in await utils.get_all_series(mem, db):
-            if s.get("name") in DEFAULT_SERIES_NAMES:
-                await db.add_subscription(chat_id, "series", s["id"], s.get("name", ""))
-                subscribed.append(s["name"])
+        popular_series = utils.filter_series_by_group(await utils.get_all_series(mem, db), "popular")
+        for s in popular_series:
+            await db.add_subscription(chat_id, "series", s["id"], s.get("name", ""))
+            subscribed.append(s["name"])
         if not subscribed:
             for vc in await utils.get_all_vehicle_classes(mem, db):
                 if vc.get("name") in DEFAULT_VEHICLE_CLASS_NAMES:

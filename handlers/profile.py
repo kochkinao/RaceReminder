@@ -16,6 +16,7 @@ router = Router()
 
 _TOGGLE_FIELDS = {
     "digest_enabled", "show_no_broadcast", "quiet_enabled",
+    "show_qualifying", "show_practice",
     "notify_3days", "notify_1day", "notify_1hour", "notify_start",
 }
 

@@ -563,26 +563,38 @@ async def _weekly_digest_job(
         user_langs = json.loads(user.get("preferred_langs", '["English"]'))
 
         sessions = _sessions_for_user(series_ids, class_ids, series_idx, class_idx)
+        sessions = [session for session in sessions if _allows_session_type(session, subs)]
 
         new_sessions = [
             s for s in sessions
             if ("digest", s["id"]) not in {(k[2], k[1]) for k in sent_set if k[0] == chat_id}
         ]
-
-        messages = utils.build_digest(
-            new_sessions, bc_map, {},
-            user_tz=user["timezone"],
-            user_langs=user_langs,
-            show_no_bc=bool(user.get("show_no_broadcast", 1)),
-            header=f"📆 <b>Гонки на неделю</b> — {label}",
-        )
-
-        from utils.kb import week_pager, back_to_menu
-        reply_markup = (
-            week_pager(0, len(messages))
-            if len(messages) > 1
-            else back_to_menu()
-        )
+        header = f"📆 <b>Гонки на неделю</b> — {label}"
+        if len(subs) > 1:
+            series_count = sum(1 for sub in subs if sub["type"] == "series")
+            class_count = sum(1 for sub in subs if sub["type"] == "vehicle_class")
+            messages = [(
+                f"{header}\n\n"
+                f"Найдено <b>{len(new_sessions)}</b> сессий на неделю.\n"
+                f"Подписок: серии — <b>{series_count}</b>, классы — <b>{class_count}</b>.\n\n"
+                f"Выберите серию или класс, чтобы сузить дайджест."
+            )]
+            reply_markup = utils.digest_pick_menu("week", subs, 0)
+        else:
+            messages = utils.build_digest(
+                new_sessions, bc_map, {},
+                user_tz=user["timezone"],
+                user_langs=user_langs,
+                show_no_bc=bool(user.get("show_no_broadcast", 1)),
+                header=header,
+            )
+            reply_markup = utils.digest_view_menu(
+                "week",
+                0,
+                len(messages),
+                selected_sub=subs[0] if subs else None,
+                allow_pick=False,
+            )
         dedupe_key = ("digest", chat_id, tuple(sorted(s["id"] for s in new_sessions)))
         if utils.delivery_queue.has(dedupe_key):
             continue

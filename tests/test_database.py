@@ -28,6 +28,8 @@ async def test_create_update_and_fetch_user(db: database.Database) -> None:
 
     assert updated["timezone"] == "Europe/Berlin"
     assert updated["digest_enabled"] == 1
+    assert updated["show_qualifying"] == 1
+    assert updated["show_practice"] == 1
 
 
 @pytest.mark.asyncio

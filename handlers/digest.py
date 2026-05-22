@@ -25,18 +25,93 @@ async def _subs_ids(db: Database, chat_id: int) -> tuple[set[str], set[str]]:
     )
 
 
-def _paginate_digest(
-    messages: list[str],
-    page: int,
+def _subscription_matches_session(session: dict, sub: dict) -> bool:
+    if sub["type"] == "series":
+        return any(series.get("id") == sub["ref_id"] for series in session.get("series", []))
+    if sub["type"] == "vehicle_class":
+        return any(
+            vehicle_class.get("id") == sub["ref_id"]
+            for series in session.get("series", [])
+            for vehicle_class in series.get("vehicleClasses", [])
+        )
+    return False
+
+
+def _matched_subscriptions(session: dict, subs: list[dict]) -> list[dict]:
+    return [sub for sub in subs if _subscription_matches_session(session, sub)]
+
+
+def _allows_session_type(session: dict, subs: list[dict]) -> bool:
+    category = utils.session_category(session.get("name", ""))
+    if category == "race":
+        return True
+    if not subs:
+        return False
+    if category == "qualifying":
+        return any(sub.get("qualifying_notify", sub.get("qual_notify", 1)) for sub in subs)
+    if category == "practice":
+        return any(sub.get("practice_notify", sub.get("qual_notify", 1)) for sub in subs)
+    return True
+
+
+def _filter_digest_sessions(
+    sessions: list[dict],
+    subs: list[dict],
+    user: dict,
+    selected_sub: dict | None = None,
+) -> list[dict]:
+    result: list[dict] = []
+    for session in sessions:
+        category = utils.session_category(session.get("name", ""))
+        if category == "qualifying" and not user.get("show_qualifying", 1):
+            continue
+        if category == "practice" and not user.get("show_practice", 1):
+            continue
+        matched = _matched_subscriptions(session, subs)
+        if selected_sub:
+            matched = [sub for sub in matched if sub["type"] == selected_sub["type"] and sub["ref_id"] == selected_sub["ref_id"]]
+        if not matched:
+            continue
+        if not _allows_session_type(session, matched):
+            continue
+        result.append(session)
+    return result
+
+
+def _resolve_subscription(subs: list[dict], scope: str, ref_id: str) -> dict | None:
+    if scope not in {"series", "vehicle_class"} or not ref_id:
+        return None
+    return next(
+        (
+            sub for sub in subs
+            if sub["type"] == scope and sub["ref_id"].startswith(ref_id)
+        ),
+        None,
+    )
+
+
+def _digest_summary_text(
     kind: str,
-) -> tuple[str, InlineKeyboardMarkup | None]:
-    total = len(messages)
-    safe_page = max(0, min(page, total - 1))
-    if total > 1:
-        kb = utils.week_pager(safe_page, total) if kind == "week" else utils.today_pager(safe_page, total)
-    else:
-        kb = utils.back_to_menu()
-    return messages[safe_page], kb
+    header: str,
+    sessions: list[dict],
+    subs: list[dict],
+) -> str:
+    series_count = sum(1 for sub in subs if sub["type"] == "series")
+    class_count = sum(1 for sub in subs if sub["type"] == "vehicle_class")
+    label = "день" if kind == "today" else "неделю"
+    return (
+        f"{header}\n\n"
+        f"Найдено <b>{len(sessions)}</b> сессий на {label}.\n"
+        f"Подписок: серии — <b>{series_count}</b>, классы — <b>{class_count}</b>.\n\n"
+        f"Выберите серию или класс, чтобы сузить дайджест."
+    )
+
+
+def _selected_digest_header(header: str, sub: dict | None) -> str:
+    if not sub:
+        return header
+    prefix = "🏎️" if sub["type"] == "series" else "🏷️"
+    return f"{header}\nФильтр: {prefix} <b>{sub['ref_name']}</b>"
 
 
 def _is_empty_digest(messages: list[str], header: str) -> bool:
@@ -133,6 +208,107 @@ def _history_filter_label(
     return filter_type
 
 
+async def _send_or_edit_digest(
+    target: Message,
+    *,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None,
+    as_edit: bool,
+) -> None:
+    if as_edit:
+        await target.edit_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=reply_markup,
+        )
+        return
+    await target.answer(
+        text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=reply_markup,
+    )
+
+
+async def _render_digest(
+    target: Message,
+    db: Database,
+    *,
+    kind: str,
+    sessions: list[dict],
+    bc_map: dict[str, list[dict]],
+    user: dict,
+    subs: list[dict],
+    header: str,
+    page: int = 0,
+    scope: str = "all",
+    ref_id: str = "",
+    action: str = "view",
+    as_edit: bool = False,
+) -> None:
+    selected_sub = _resolve_subscription(subs, scope, ref_id)
+    user_langs = json.loads(user.get("preferred_langs", '["English"]'))
+
+    if len(subs) <= 1 and not selected_sub and subs:
+        selected_sub = subs[0]
+
+    filtered_sessions = _filter_digest_sessions(sessions, subs, user, selected_sub if scope != "all" or len(subs) <= 1 else None)
+    view_header = _selected_digest_header(header, selected_sub if scope != "all" or len(subs) <= 1 else None)
+
+    if action == "pick" and len(subs) > 1:
+        await _send_or_edit_digest(
+            target,
+            text=_digest_summary_text(kind, header, filtered_sessions, subs),
+            reply_markup=utils.digest_pick_menu(kind, subs, page),
+            as_edit=as_edit,
+        )
+        return
+
+    messages = utils.build_digest(
+        filtered_sessions,
+        bc_map,
+        {},
+        user_tz=user["timezone"],
+        user_langs=user_langs,
+        show_no_bc=bool(user.get("show_no_broadcast", 1)),
+        header=view_header,
+    )
+
+    if _is_empty_digest(messages, view_header):
+        kb = utils.digest_view_menu(
+            kind,
+            0,
+            1,
+            selected_sub=selected_sub if scope != "all" or len(subs) <= 1 else None,
+            user=user,
+            allow_pick=len(subs) > 1,
+        )
+        await _send_or_edit_digest(
+            target,
+            text=messages[0],
+            reply_markup=kb,
+            as_edit=as_edit,
+        )
+        return
+
+    safe_page = max(0, min(page, len(messages) - 1))
+    kb = utils.digest_view_menu(
+        kind,
+        safe_page,
+        len(messages),
+        selected_sub=selected_sub if scope != "all" or len(subs) <= 1 else None,
+        user=user,
+        allow_pick=len(subs) > 1,
+    )
+    await _send_or_edit_digest(
+        target,
+        text=messages[safe_page],
+        reply_markup=kb,
+        as_edit=as_edit,
+    )
+
+
 # ── /today ────────────────────────────────────────────────────────────────────
 
 @router.message(Command("today"))
@@ -149,7 +325,69 @@ async def cb_today(callback: CallbackQuery, db: Database, mem: MemoryCache) -> N
 async def cb_today_page(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
     await callback.answer()
     page = int(callback.data.split(":", 1)[1])
-    await _handle_today(callback.message, db, mem, page=page, as_edit=True)
+    await _handle_today(callback.message, db, mem, page=page, action="view", as_edit=True)
+
+
+async def _toggle_digest_subscription(
+    callback: CallbackQuery,
+    callback_data: utils.DigestViewCD,
+    db: Database,
+    mem: MemoryCache,
+) -> None:
+    if callback_data.field not in {"show_qualifying", "show_practice"}:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
+
+    user = await db.get_user(callback.from_user.id)
+    new_value = 0 if user.get(callback_data.field, 1) else 1
+    await db.update_user(callback.from_user.id, **{callback_data.field: new_value})
+
+    if callback_data.kind == "today":
+        await _handle_today(
+            callback.message,
+            db,
+            mem,
+            page=callback_data.page,
+            scope=callback_data.scope,
+            ref_id=callback_data.ref_id,
+            action="view",
+            as_edit=True,
+        )
+    else:
+        await _handle_week(
+            callback.message,
+            db,
+            mem,
+            page=callback_data.page,
+            scope=callback_data.scope,
+            ref_id=callback_data.ref_id,
+            action="view",
+            as_edit=True,
+        )
+    await callback.answer("Настройка обновлена")
+
+
+@router.callback_query(utils.DigestViewCD.filter(F.kind == "today"))
+async def cb_today_digest(
+    callback: CallbackQuery,
+    callback_data: utils.DigestViewCD,
+    db: Database,
+    mem: MemoryCache,
+) -> None:
+    if callback_data.action == "toggle":
+        await _toggle_digest_subscription(callback, callback_data, db, mem)
+        return
+    await _handle_today(
+        callback.message,
+        db,
+        mem,
+        page=callback_data.page,
+        scope=callback_data.scope,
+        ref_id=callback_data.ref_id,
+        action=callback_data.action,
+        as_edit=True,
+    )
+    await callback.answer()
 
 
 async def _handle_today(
@@ -157,12 +395,16 @@ async def _handle_today(
     db: Database,
     mem: MemoryCache,
     page: int = 0,
+    scope: str = "all",
+    ref_id: str = "",
+    action: str = "pick",
     as_edit: bool = False,
 ) -> None:
     from datetime import datetime, timezone
     user          = await db.get_user(target.chat.id)
     t_start, t_end = utils.today_window()
     series_ids, class_ids = await _subs_ids(db, target.chat.id)
+    subs = await db.get_subscriptions(target.chat.id)
 
     all_sessions   = await utils.get_sessions(mem, db, t_start, t_end)
     all_broadcasts = await utils.get_broadcasts(mem, db, t_start)
@@ -184,45 +426,20 @@ async def _handle_today(
 
     date_label = now_local.strftime("%d %B %Y")
     header = f"{_TODAY_HEADER} — {date_label}"
-    messages = utils.build_digest(
-        sessions, bc_map, {},
-        user_tz=user["timezone"],
-        user_langs=json.loads(user.get("preferred_langs", '["English"]')),
-        show_no_bc=bool(user.get("show_no_broadcast", 1)),
+    await _render_digest(
+        target,
+        db,
+        kind="today",
+        sessions=sessions,
+        bc_map=bc_map,
+        user=user,
+        subs=subs,
         header=header,
-    )
-
-    if _is_empty_digest(messages, header):
-        text = messages[0]
-        if as_edit:
-            await target.edit_text(
-                text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            return
-        await target.answer(
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        return
-
-    text, kb = _paginate_digest(messages, page, "today")
-    if as_edit:
-        await target.edit_text(
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-            reply_markup=kb,
-        )
-        return
-
-    await target.answer(
-        text,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=kb,
+        page=page,
+        scope=scope,
+        ref_id=ref_id,
+        action=action,
+        as_edit=as_edit,
     )
 
 
@@ -242,7 +459,30 @@ async def cb_week(callback: CallbackQuery, db: Database, mem: MemoryCache) -> No
 async def cb_week_page(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
     await callback.answer()
     page = int(callback.data.split(":", 1)[1])
-    await _handle_week(callback.message, db, mem, page=page, as_edit=True)
+    await _handle_week(callback.message, db, mem, page=page, action="view", as_edit=True)
+
+
+@router.callback_query(utils.DigestViewCD.filter(F.kind == "week"))
+async def cb_week_digest(
+    callback: CallbackQuery,
+    callback_data: utils.DigestViewCD,
+    db: Database,
+    mem: MemoryCache,
+) -> None:
+    if callback_data.action == "toggle":
+        await _toggle_digest_subscription(callback, callback_data, db, mem)
+        return
+    await _handle_week(
+        callback.message,
+        db,
+        mem,
+        page=callback_data.page,
+        scope=callback_data.scope,
+        ref_id=callback_data.ref_id,
+        action=callback_data.action,
+        as_edit=True,
+    )
+    await callback.answer()
 
 
 async def _handle_week(
@@ -250,60 +490,37 @@ async def _handle_week(
     db: Database,
     mem: MemoryCache,
     page: int = 0,
+    scope: str = "all",
+    ref_id: str = "",
+    action: str = "pick",
     as_edit: bool = False,
 ) -> None:
     user = await db.get_user(target.chat.id)
     w_start, w_end = utils.week_window()
     series_ids, class_ids = await _subs_ids(db, target.chat.id)
+    subs = await db.get_subscriptions(target.chat.id)
 
     all_sessions   = await utils.get_sessions(mem, db, w_start, w_end)
     all_broadcasts = await utils.get_broadcasts(mem, db, w_start)
     sessions = utils.filter_sessions_for_user(all_sessions, series_ids, class_ids)
     bc_map   = utils.broadcasts_by_session(all_broadcasts)
-    langs    = json.loads(user.get("preferred_langs", '["English"]'))
     label    = utils.week_label(w_start, w_end)
 
     header = f"{_WEEK_HEADER} — {label}"
-    messages = utils.build_digest(
-        sessions, bc_map, {},
-        user_tz=user["timezone"],
-        user_langs=langs,
-        show_no_bc=bool(user.get("show_no_broadcast", 1)),
+    await _render_digest(
+        target,
+        db,
+        kind="week",
+        sessions=sessions,
+        bc_map=bc_map,
+        user=user,
+        subs=subs,
         header=header,
-    )
-
-    if _is_empty_digest(messages, header):
-        text = messages[0]
-        if as_edit:
-            await target.edit_text(
-                text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            return
-        await target.answer(
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        return
-
-    text, kb = _paginate_digest(messages, page, "week")
-
-    if as_edit:
-        await target.edit_text(
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-            reply_markup=kb,
-        )
-        return
-
-    await target.answer(
-        text,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=kb,
+        page=page,
+        scope=scope,
+        ref_id=ref_id,
+        action=action,
+        as_edit=as_edit,
     )
 
 

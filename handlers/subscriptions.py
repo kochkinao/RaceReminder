@@ -186,12 +186,12 @@ async def cb_series_page(
         )
         await callback.answer()
         return
-    group_items = utils.filter_series_by_group(all_series, group, sub_ids)
-    if not subgroup and utils.series_has_subgroups(group, group_items):
+    group_items = utils.filter_series_by_group(all_series, group, sub_ids, subgroup=subgroup)
+    if utils.series_has_subgroups(group, group_items, subgroup):
         await callback.message.edit_text(
             f"🏎️ <b>{utils.series_group_label(group)}</b>\nВыберите подгруппу.",
             parse_mode="HTML",
-            reply_markup=utils.series_subgroup_menu(all_series, group, sub_ids),
+            reply_markup=utils.series_subgroup_menu(all_series, group, sub_ids, subgroup=subgroup),
         )
         await callback.answer()
         return

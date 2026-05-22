@@ -36,6 +36,7 @@ class Database:
             PRAGMA temp_store     = MEMORY;
         """)
         await self._create_tables()
+        await self._migrate_users_schema()
         await self._migrate_subscriptions_schema()
 
     async def close(self) -> None:
@@ -55,6 +56,8 @@ class Database:
                 quiet_start       INTEGER NOT NULL DEFAULT 23,
                 quiet_end         INTEGER NOT NULL DEFAULT 7,
                 show_no_broadcast INTEGER NOT NULL DEFAULT 1,
+                show_qualifying   INTEGER NOT NULL DEFAULT 1,
+                show_practice     INTEGER NOT NULL DEFAULT 1,
                 notify_3days      INTEGER NOT NULL DEFAULT 0,
                 notify_1day       INTEGER NOT NULL DEFAULT 1,
                 notify_1hour      INTEGER NOT NULL DEFAULT 1,
@@ -143,6 +146,22 @@ class Database:
         async with self._db.execute(sql, params) as cur:
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
+
+    async def _migrate_users_schema(self) -> None:
+        rows = await self._fetchall("PRAGMA table_info(users)")
+        columns = {row["name"] for row in rows}
+
+        if "show_qualifying" not in columns:
+            await self._db.execute(
+                "ALTER TABLE users ADD COLUMN show_qualifying INTEGER NOT NULL DEFAULT 1"
+            )
+
+        if "show_practice" not in columns:
+            await self._db.execute(
+                "ALTER TABLE users ADD COLUMN show_practice INTEGER NOT NULL DEFAULT 1"
+            )
+
+        await self._db.commit()
 
     async def _migrate_subscriptions_schema(self) -> None:
         rows = await self._fetchall("PRAGMA table_info(subscriptions)")

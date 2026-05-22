@@ -107,7 +107,7 @@ ALLOWED_USER_FIELDS: frozenset[str] = frozenset({
     "username", "timezone", "preferred_langs",
     "digest_enabled", "digest_time",
     "quiet_enabled", "quiet_start", "quiet_end",
-    "show_no_broadcast",
+    "show_no_broadcast", "show_qualifying", "show_practice",
     "notify_3days", "notify_1day", "notify_1hour", "notify_start",
 })
 

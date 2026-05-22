@@ -9,6 +9,7 @@ BOT_TOKEN: str     = os.getenv("BOT_TOKEN", "")
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", "data/raceday.db")
 API_BASE_URL: str  = os.getenv("API_BASE_URL", "https://api.raceday.watch")
 LOG_LEVEL: str     = os.getenv("LOG_LEVEL", "INFO")
+API_FALLBACK_STALE_SECONDS: int = int(os.getenv("API_FALLBACK_STALE_SECONDS", str(7 * 24 * 3600)))
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
 ADMIN_IDS: set[int] = {

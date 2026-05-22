@@ -91,6 +91,16 @@ class Database:
                 UNIQUE(chat_id, session_id)
             );
 
+            CREATE TABLE IF NOT EXISTS session_reminders (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id      INTEGER NOT NULL REFERENCES users(chat_id) ON DELETE CASCADE,
+                session_id   TEXT    NOT NULL,
+                remind_type  TEXT    NOT NULL,
+                remind_at_ts INTEGER NOT NULL,
+                created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(chat_id, session_id, remind_type)
+            );
+
             CREATE TABLE IF NOT EXISTS api_cache (
                 key       TEXT PRIMARY KEY,
                 value     TEXT NOT NULL,
@@ -108,6 +118,7 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_subs_chat  ON subscriptions(chat_id);
             CREATE INDEX IF NOT EXISTS idx_sent_chat  ON sent_notifications(chat_id);
             CREATE INDEX IF NOT EXISTS idx_sent_ts    ON sent_notifications(sent_at);
+            CREATE INDEX IF NOT EXISTS idx_reminders_due ON session_reminders(remind_at_ts);
             CREATE INDEX IF NOT EXISTS idx_log_type   ON event_log(event_type);
             CREATE INDEX IF NOT EXISTS idx_log_chat   ON event_log(chat_id);
         """)
@@ -214,6 +225,37 @@ class Database:
         }
         return {k: (v["n"] if v else 0) for k, v in rows.items()}
 
+    async def get_user_counts(self, chat_id: int) -> dict[str, int]:
+        rows = {
+            "subscriptions": await self._fetchone(
+                "SELECT COUNT(*) n FROM subscriptions WHERE chat_id=?", (chat_id,)
+            ),
+            "favorites": await self._fetchone(
+                "SELECT COUNT(*) n FROM favorites WHERE chat_id=?", (chat_id,)
+            ),
+            "reminders": await self._fetchone(
+                "SELECT COUNT(*) n FROM session_reminders WHERE chat_id=?", (chat_id,)
+            ),
+            "sent_notifications": await self._fetchone(
+                "SELECT COUNT(*) n FROM sent_notifications WHERE chat_id=?", (chat_id,)
+            ),
+        }
+        return {k: (v["n"] if v else 0) for k, v in rows.items()}
+
+    async def get_user_sent_notifications(self, chat_id: int, limit: int = 10) -> list[Row]:
+        return await self._fetchall(
+            "SELECT session_id, notif_type, sent_at "
+            "FROM sent_notifications WHERE chat_id=? "
+            "ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        )
+
+    async def get_user_event_log(self, chat_id: int, limit: int = 10) -> list[Row]:
+        return await self._fetchall(
+            "SELECT ts, event_type, payload FROM event_log WHERE chat_id=? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        )
+
     # ── Subscriptions ─────────────────────────────────────────────────────────
 
     async def get_subscriptions(self, chat_id: int) -> list[Row]:
@@ -241,6 +283,12 @@ class Database:
         await self._execute(
             "DELETE FROM subscriptions WHERE chat_id=? AND type=? AND ref_id=?",
             (chat_id, type_, ref_id),
+        )
+
+    async def remove_all_subscriptions(self, chat_id: int) -> None:
+        await self._execute(
+            "DELETE FROM subscriptions WHERE chat_id=?",
+            (chat_id,),
         )
 
     async def update_subscription(
@@ -336,6 +384,39 @@ class Database:
             (chat_id, session_id),
         )
 
+    # ── Session reminders ────────────────────────────────────────────────────
+
+    async def get_session_reminders(self, chat_id: int, session_id: str) -> list[Row]:
+        return await self._fetchall(
+            "SELECT * FROM session_reminders WHERE chat_id=? AND session_id=? ORDER BY remind_at_ts",
+            (chat_id, session_id),
+        )
+
+    async def add_session_reminder(
+        self, chat_id: int, session_id: str, remind_type: str, remind_at_ts: int
+    ) -> None:
+        await self._execute(
+            "INSERT OR REPLACE INTO session_reminders (chat_id, session_id, remind_type, remind_at_ts) VALUES (?,?,?,?)",
+            (chat_id, session_id, remind_type, remind_at_ts),
+        )
+
+    async def remove_session_reminder(
+        self, chat_id: int, session_id: str, remind_type: str
+    ) -> None:
+        await self._execute(
+            "DELETE FROM session_reminders WHERE chat_id=? AND session_id=? AND remind_type=?",
+            (chat_id, session_id, remind_type),
+        )
+
+    async def get_due_session_reminders(self, now_ts: int) -> list[Row]:
+        return await self._fetchall(
+            "SELECT sr.* FROM session_reminders sr "
+            "JOIN users u ON u.chat_id=sr.chat_id "
+            "WHERE u.is_active=1 AND sr.remind_at_ts<=? "
+            "ORDER BY sr.remind_at_ts, sr.id",
+            (now_ts,),
+        )
+
     # ── Event log ─────────────────────────────────────────────────────────────
 
     async def log_event(
@@ -362,6 +443,15 @@ class Database:
                WHERE key=?
                AND (julianday('now') - julianday(cached_at)) * 86400 < ?""",
             (key, ttl_seconds),
+        )
+        return row["value"] if row else None
+
+    async def get_cache_stale(self, key: str, max_age_seconds: int) -> str | None:
+        row = await self._fetchone(
+            """SELECT value FROM api_cache
+               WHERE key=?
+               AND (julianday('now') - julianday(cached_at)) * 86400 < ?""",
+            (key, max_age_seconds),
         )
         return row["value"] if row else None
 

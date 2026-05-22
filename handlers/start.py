@@ -1,4 +1,5 @@
 import logging
+from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart, Command
@@ -39,12 +40,13 @@ async def cb_check_sub(callback: CallbackQuery) -> None:
 
 @router.message(CommandStart())
 async def cmd_start(
-    message: Message, state: FSMContext, db: Database, mem: MemoryCache
+    message: Message, state: FSMContext, db: Database, mem: MemoryCache, metrics
 ) -> None:
     if await db.user_exists(message.chat.id):
         await message.answer("👋 С возвращением!", reply_markup=utils.main_menu())
         return
     await db.create_user(message.chat.id, message.from_user.username)
+    metrics.new_users.inc()
     await message.answer(_WELCOME, parse_mode="HTML", reply_markup=utils.timezone_picker())
     await state.set_state(OnboardingStates.choosing_timezone)
 
@@ -84,7 +86,7 @@ async def msg_tz_manual(
         pytz.timezone(tz_input)
     except Exception:
         await message.answer(
-            f"❌ Неизвестный часовой пояс <code>{tz_input}</code>. Попробуйте снова.",
+            f"❌ Неизвестный часовой пояс <code>{escape(tz_input)}</code>. Попробуйте снова.",
             parse_mode="HTML",
             reply_markup=utils.timezone_picker(),
         )

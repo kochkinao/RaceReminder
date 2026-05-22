@@ -129,6 +129,10 @@ sudo journalctl -u raceday-bot -f
 | `BOT_TOKEN` | ✅ | Токен от @BotFather |
 | `DATABASE_PATH` | — | Путь к SQLite (default: `data/raceday.db`) |
 | `API_BASE_URL` | — | Базовый URL API (default: `https://api.raceday.watch`) |
+| `API_FALLBACK_STALE_SECONDS` | — | Максимальный возраст stale L2 cache для fallback (default: `604800`) |
 | `LOG_LEVEL` | — | `INFO` / `DEBUG` / `WARNING` |
 | `CHANNEL_ID` | — | ID канала для гейта (напр. `@mychannel`) |
 | `CHANNEL_LINK` | — | Ссылка на канал для кнопки |
+
+При недоступности `raceday.watch` бот умеет использовать `stale` данные из SQLite-кэша
+как fallback source, если они не старше `API_FALLBACK_STALE_SECONDS`.

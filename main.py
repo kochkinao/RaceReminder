@@ -47,11 +47,13 @@ async def main() -> None:
     db      = Database()
     mem     = MemoryCache()
     metrics = Metrics()
+    state   = utils.RuntimeState()
 
     await db.connect()
+    state.mark_db_connected()
 
     # ── 3. Cache warm-up ──────────────────────────────────────────────────────
-    await utils.warm_up(mem, db)
+    state.last_warmup_ok = await utils.warm_up(mem, db)
 
     # ── 4. Bot + Dispatcher ───────────────────────────────────────────────────
     bot = Bot(
@@ -63,6 +65,7 @@ async def main() -> None:
     # Wire bot into admin alert handler so errors go to Telegram
     loop = asyncio.get_running_loop()
     admin_handler.set_bot(bot, loop)
+    state.mark_bot_started()
     log.info("Admin alert handler connected (IDs: %s)", ADMIN_IDS)
 
     # Middlewares — order matters
@@ -77,11 +80,13 @@ async def main() -> None:
     dp.include_router(handlers.subscriptions.router)
     dp.include_router(handlers.digest.router)
     dp.include_router(handlers.search.router)
+    dp.include_router(handlers.session_details.router)
     dp.include_router(handlers.admin.router)
 
     # ── 5. Scheduler ─────────────────────────────────────────────────────────
-    scheduler = make_scheduler(bot, db, mem, metrics)
+    scheduler = make_scheduler(bot, db, mem, metrics, state)
     scheduler.start()
+    state.mark_scheduler_started()
     log.info("Scheduler started")
 
     # Alert admins that bot started

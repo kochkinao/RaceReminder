@@ -1,5 +1,6 @@
 import json
 import logging
+from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -141,7 +142,10 @@ async def msg_tz_manual(message: Message, state: FSMContext, db: Database) -> No
         return
     await db.update_user(message.chat.id, timezone=tz_input)
     await state.clear()
-    await message.answer(f"✅ Часовой пояс: <code>{tz_input}</code>", parse_mode="HTML")
+    await message.answer(
+        f"✅ Часовой пояс: <code>{escape(tz_input)}</code>",
+        parse_mode="HTML",
+    )
     await _show_profile(message, db)
 
 

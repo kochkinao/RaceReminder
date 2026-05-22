@@ -5,3 +5,5 @@ aiohttp==3.13.5
 pillow==12.1.1
 python-dotenv==1.0.1
 pytz==2026.2
+pytest==8.4.2
+pytest-asyncio==1.2.0

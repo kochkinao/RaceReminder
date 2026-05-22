@@ -36,6 +36,7 @@ class Metrics:
         # API
         self.api_requests     = _Counter()
         self.api_errors       = _Counter()
+        self.api_fallbacks    = _Counter()
         self.cache_l1_hits    = _Counter()
         self.cache_l2_hits    = _Counter()
         self.cache_misses     = _Counter()
@@ -86,6 +87,7 @@ class Metrics:
             "new_users":            self.new_users.total,
             "api_requests":         self.api_requests.total,
             "api_errors":           self.api_errors.total,
+            "api_fallbacks":        self.api_fallbacks.total,
             "cache_l1_hits":        self.cache_l1_hits.total,
             "cache_l2_hits":        self.cache_l2_hits.total,
             "cache_misses":         self.cache_misses.total,

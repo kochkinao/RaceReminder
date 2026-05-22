@@ -27,6 +27,12 @@ _STATUS_LABELS: dict[int, str] = {
     4: "⏸ Отложена",
 }
 
+_CATEGORY_LABELS: dict[str, str] = {
+    "race": "🏁 Гонка",
+    "qualifying": "🎯 Квалификация",
+    "practice": "🛠 Практика",
+}
+
 QUALIFYING_KEYWORDS = frozenset({
     "quali", "qualifying", "квали", "pole",
     "hyperpole", "shootout",
@@ -72,6 +78,14 @@ def session_category(name: str) -> str:
     return "race"
 
 
+def _category_label(name: str) -> str:
+    return _CATEGORY_LABELS.get(session_category(name), "🏁 Сессия")
+
+
+def _local_day_label(ts: int, tz_name: str) -> str:
+    return to_local(ts, tz_name).strftime("%a, %d %b").capitalize()
+
+
 # ── Visual helpers ────────────────────────────────────────────────────────────
 
 def class_emojis(session: SessionDict) -> str:
@@ -106,6 +120,7 @@ def session_card(
     status:   int  = session.get("status", 0)
     emoji          = class_emojis(session)
     series_names   = " · ".join(s.get("name", "") for s in session.get("series", []))
+    category_label = _category_label(name)
 
     if compact:
         t      = fmt_time(start_ts, user_tz) if start_ts else "?"
@@ -113,22 +128,28 @@ def session_card(
         if bc:
             b0    = bc[0]
             desc  = b0.get("description") or "Трансляция"
-            bc_str = f" | 📺 {desc}" + (" [$]" if b0.get("isPaid") else "")
+            bc_str = f" · 📺 {desc}" + (" [$]" if b0.get("isPaid") else "")
+        elif live_timings:
+            bc_str = " · 📊 Live Timing"
         status_str = f" {_STATUS_LABELS[status]}" if status else ""
-        return f"{emoji} <b>{name}</b> — {t}{status_str}{bc_str}"
+        series_str = f" · {series_names}" if series_names else ""
+        return f"{t} · {category_label}\n{emoji} <b>{name}</b>{series_str}{status_str}{bc_str}"
 
     lines = [f"{emoji} <b>{name}</b>"]
 
     # Status (only show non-default)
     if status_label := _STATUS_LABELS.get(status, ""):
         lines.append(status_label)
+    lines.append(category_label)
 
     if series_names:
         lines.append(f"📋 {series_names}")
-    if start_ts:
+    if start_ts and duration:
+        lines.append(f"🕐 {fmt_datetime(start_ts, user_tz)} · {fmt_duration(duration)}")
+    elif start_ts:
         lines.append(f"🕐 {fmt_datetime(start_ts, user_tz)}")
-    if duration:
-        lines.append(f"⏱ Длительность: {fmt_duration(duration)}")
+    elif duration:
+        lines.append(f"⏱ {fmt_duration(duration)}")
 
     # Location — use alternateName if available, fallback to name
     if location:
@@ -157,7 +178,8 @@ def session_card(
 
     # Broadcasts
     if bc:
-        lines.append("\n📺 <b>Трансляции:</b>")
+        lines.append("")
+        lines.append("📺 <b>Трансляции</b>")
         for b in bc[:5]:
             desc   = b.get("description") or "Трансляция"
             url    = b.get("url", "")
@@ -166,16 +188,18 @@ def session_card(
             geo    = " 🌍" if b.get("isGeoblocked") else ""
             langs  = f" [{' · '.join(b.get('langIds', []))}]" if b.get("langIds") else ""
             body   = f"<a href='{url}'>{desc}</a>" if url else desc
-            lines.append(f"  {btype} {body}{paid}{geo}{langs}")
+            lines.append(f"• {btype} {body}{paid}{geo}{langs}".strip())
     elif show_no_bc:
-        lines.append("\n📺 Трансляция: не найдена для вашего языка")
+        lines.append("")
+        lines.append("📺 Для выбранных языков трансляция пока не найдена")
 
     if live_timings:
-        lines.append("📊 <b>Live Timing:</b>")
+        lines.append("")
+        lines.append("📊 <b>Live Timing</b>")
         for lt in live_timings[:3]:
             desc = lt.get("description", "Live Timing")
             url  = lt.get("url", "")
-            lines.append("  " + (f"<a href='{url}'>{desc}</a>" if url else desc))
+            lines.append("• " + (f"<a href='{url}'>{desc}</a>" if url else desc))
 
     return "\n".join(lines)
 
@@ -193,6 +217,7 @@ def build_digest(
 ) -> list[str]:
     messages: list[str] = []
     current = header + "\n" if header else ""
+    current_day = ""
 
     for s in sessions:
         sid  = s.get("id", "")
@@ -206,10 +231,16 @@ def build_digest(
         )
         if card is None:
             continue
-        entry = "\n" + "─" * 30 + "\n" + card
+        day_heading = ""
+        if s.get("start"):
+            session_day = _local_day_label(s["start"], user_tz)
+            if session_day != current_day:
+                current_day = session_day
+                day_heading = f"\n\n<b>{session_day}</b>\n"
+        entry = f"{day_heading}\n{'─' * 30}\n{card}"
         if len(current) + len(entry) > 3_800:
             messages.append(current)
-            current = entry
+            current = ((header + "\n") if header else "") + entry.lstrip("\n")
         else:
             current += entry
 

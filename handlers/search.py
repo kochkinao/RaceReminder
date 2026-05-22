@@ -1,6 +1,7 @@
 import logging
 import re
 import unicodedata
+from html import escape
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -118,6 +119,7 @@ async def msg_search_query(message: Message, db: Database, mem: MemoryCache) -> 
     query = message.text.strip()
     if not query:
         return
+    safe_query = escape(query)
 
     low = query.lower().strip()
 
@@ -133,7 +135,7 @@ async def msg_search_query(message: Message, db: Database, mem: MemoryCache) -> 
 
     if not series_matches and not class_matches:
         await message.answer(
-            f"😕 Ничего не найдено по запросу <b>{query}</b>\n\n"
+            f"😕 Ничего не найдено по запросу <b>{safe_query}</b>\n\n"
             "Попробуйте другой запрос или воспользуйтесь базой знаний.",
             parse_mode="HTML",
             reply_markup=utils.back_to_menu(),
@@ -143,25 +145,32 @@ async def msg_search_query(message: Message, db: Database, mem: MemoryCache) -> 
     btns: list[list[InlineKeyboardButton]] = []
 
     if series_matches:
-        btns.append([InlineKeyboardButton(text="── Серии ──", callback_data="noop")])
+        btns.append([InlineKeyboardButton(text=f"🏎️ Серии · {len(series_matches)}", callback_data="noop")])
         for s in series_matches[:10]:
+            is_subscribed = await db.is_subscribed(message.from_user.id, "series", s["id"])
+            prefix = "💔" if is_subscribed else "✅"
             btns.append([InlineKeyboardButton(
-                text=s["name"],
+                text=f"{prefix} {s['name']}",
                 callback_data=utils.SubToggleCD(type="series", ref_id=s["id"], page=0).pack(),
             )])
 
     if class_matches:
-        btns.append([InlineKeyboardButton(text="── Классы ──", callback_data="noop")])
+        btns.append([InlineKeyboardButton(text=f"🏷️ Классы · {len(class_matches)}", callback_data="noop")])
         for c in class_matches[:10]:
+            is_subscribed = await db.is_subscribed(message.from_user.id, "vehicle_class", c["id"])
+            prefix = "💔" if is_subscribed else "✅"
             btns.append([InlineKeyboardButton(
-                text=c["name"],
+                text=f"{prefix} {c['name']}",
                 callback_data=utils.SubToggleCD(type="vehicle_class", ref_id=c["id"], page=0).pack(),
             )])
 
     btns.append([InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")])
 
     await message.answer(
-        f"🔍 Результаты по <b>{query}</b>:",
+        f"🔍 <b>Результаты поиска</b>\n\n"
+        f"Запрос: <b>{safe_query}</b>\n"
+        f"Найдено: серии — <b>{len(series_matches)}</b>, классы — <b>{len(class_matches)}</b>\n\n"
+        "Нажмите на пункт, чтобы подписаться или отписаться.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
     )

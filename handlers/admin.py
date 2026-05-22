@@ -12,7 +12,9 @@ Commands:
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
+from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -25,6 +27,7 @@ from aiogram.types import (
 
 from config import ADMIN_IDS, TELEGRAM_SEND_DELAY
 from database import Database
+import utils
 from utils.cache import MemoryCache
 from utils.metrics import Metrics
 
@@ -36,6 +39,85 @@ router = Router()
 
 def _is_admin(message: Message) -> bool:
     return message.from_user.id in ADMIN_IDS
+
+
+def _user_kb(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🧪 Тест", callback_data=f"adm:user_ping:{chat_id}"),
+            InlineKeyboardButton(text="🐞 Debug", callback_data=f"adm:user_debug:{chat_id}"),
+        ],
+        [InlineKeyboardButton(text="◀️ К пользователям", callback_data="adm:users")],
+    ])
+
+
+def _parse_admin_send_args(text: str) -> tuple[int, str]:
+    parts = text.split(maxsplit=2)
+    if len(parts) < 3:
+        raise ValueError("usage")
+    chat_id = int(parts[1])
+    body = parts[2].strip()
+    if not body:
+        raise ValueError("empty")
+    return chat_id, body
+
+
+async def _render_user_card(chat_id: int, db: Database) -> str | None:
+    user = await db.get_user(chat_id)
+    if not user:
+        return None
+    counts = await db.get_user_counts(chat_id)
+    langs = ", ".join(json.loads(user.get("preferred_langs", '["English"]')))
+    username = escape(user.get("username") or "—")
+    return (
+        f"👤 <b>Пользователь {chat_id}</b>\n\n"
+        f"Username: <b>{username}</b>\n"
+        f"Активен: <b>{'да' if user['is_active'] else 'нет'}</b>\n"
+        f"Таймзона: <code>{user['timezone']}</code>\n"
+        f"Языки: <b>{escape(langs)}</b>\n"
+        f"Дайджест: {'вкл' if user['digest_enabled'] else 'выкл'} в {user['digest_time']}\n"
+        f"Тихие часы: {'вкл' if user['quiet_enabled'] else 'выкл'} ({user['quiet_start']}:00–{user['quiet_end']}:00)\n"
+        f"Последняя активность: <code>{user['last_seen_at']}</code>\n"
+        f"Создан: <code>{user['created_at']}</code>\n\n"
+        f"Подписки: <b>{counts['subscriptions']}</b>\n"
+        f"Избранное: <b>{counts['favorites']}</b>\n"
+        f"Персональные reminder'ы: <b>{counts['reminders']}</b>\n"
+        f"Отправленных уведомлений: <b>{counts['sent_notifications']}</b>"
+    )
+
+
+async def _render_user_debug(chat_id: int, db: Database) -> str | None:
+    user = await db.get_user(chat_id)
+    if not user:
+        return None
+    subs = await db.get_subscriptions(chat_id)
+    sent = await db.get_user_sent_notifications(chat_id, limit=8)
+    events = await db.get_user_event_log(chat_id, limit=8)
+
+    subs_text = "\n".join(
+        f"  {s['type']} | {escape(s['ref_name'])} | qual={s.get('qualifying_notify', s.get('qual_notify', 1))} | practice={s.get('practice_notify', s.get('qual_notify', 1))}"
+        for s in subs[:10]
+    ) or "  —"
+    sent_text = "\n".join(
+        f"  {row['sent_at'][:16]} | {row['notif_type']} | {row['session_id'][:8]}"
+        for row in sent
+    ) or "  —"
+    event_lines = []
+    for row in events:
+        payload = ""
+        if row.get("payload"):
+            payload = f" | {escape(str(row['payload'])[:60])}"
+        event_lines.append(f"  {row['ts'][:16]} | {row['event_type']}{payload}")
+    events_text = "\n".join(event_lines) or "  —"
+
+    return (
+        f"🐞 <b>Debug user {chat_id}</b>\n\n"
+        f"<b>Raw profile</b>\n"
+        f"<pre>{escape(json.dumps(dict(user), ensure_ascii=False, indent=2))}</pre>\n"
+        f"<b>Subscriptions</b>\n<pre>{subs_text}</pre>\n"
+        f"<b>Recent sent notifications</b>\n<pre>{sent_text}</pre>\n"
+        f"<b>Recent events</b>\n<pre>{events_text}</pre>"
+    )
 
 
 def _admin_kb() -> InlineKeyboardMarkup:
@@ -63,6 +145,7 @@ def _admin_kb() -> InlineKeyboardMarkup:
 async def _dashboard_text(db: Database, mem: MemoryCache, metrics: Metrics) -> str:
     stats = await db.get_stats()
     m     = metrics.summary()
+    fallback = utils.fallback_stats()
     now   = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
 
     cache_total = m["cache_l1_hits"] + m["cache_l2_hits"] + m["cache_misses"]
@@ -98,6 +181,10 @@ async def _dashboard_text(db: Database, mem: MemoryCache, metrics: Metrics) -> s
         f"  Записей: {mem.size()}\n"
         f"  L1 hit: {l1_pct}% | L2 hit: {l2_pct}%\n"
         f"  API запросов: {m['api_requests']} | Ошибок: {m['api_errors']}\n"
+        f"  Fallback на stale cache: {fallback['count']}\n"
+        f"\n"
+        f"<b>📬 Retry queue</b>\n"
+        f"  В очереди: {utils.delivery_queue.size()}\n"
     )
 
 
@@ -153,7 +240,7 @@ async def cb_users(callback: CallbackQuery, db: Database) -> None:
         "ORDER BY created_at DESC LIMIT 5"
     )
     recent_text = "\n".join(
-        f"  {r['created_at'][:16]} — @{r['username'] or r['chat_id']}"
+        f"  {r['created_at'][:16]} — @{escape(r['username'] or str(r['chat_id']))}"
         for r in recent
     ) or "  —"
 
@@ -166,13 +253,92 @@ async def cb_users(callback: CallbackQuery, db: Database) -> None:
         f"Новых за неделю: <b>{stats['new_week']}</b>\n\n"
         f"<b>🌍 Топ таймзон:</b>\n{tz_text}\n\n"
         f"<b>🌐 Топ языков:</b>\n{lang_text}\n\n"
-        f"<b>🕐 Последние регистрации:</b>\n{recent_text}"
+        f"<b>🕐 Последние регистрации:</b>\n{recent_text}\n\n"
+        f"Для детального просмотра используйте <code>/admin_user CHAT_ID</code>."
     )
+    rows = [
+        [InlineKeyboardButton(text=f"👤 {r['chat_id']}", callback_data=f"adm:user:{r['chat_id']}")]
+        for r in recent
+    ]
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:refresh")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+@router.message(Command("admin_user"))
+async def cmd_admin_user(message: Message, db: Database) -> None:
+    if not _is_admin(message):
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip().isdigit():
+        await message.answer("Использование: <code>/admin_user CHAT_ID</code>", parse_mode="HTML")
+        return
+    chat_id = int(parts[1].strip())
+    text = await _render_user_card(chat_id, db)
+    if text is None:
+        await message.answer("Пользователь не найден.")
+        return
+    await message.answer(text, parse_mode="HTML", reply_markup=_user_kb(chat_id))
+
+
+@router.callback_query(F.data.startswith("adm:user:"))
+async def cb_admin_user(callback: CallbackQuery, db: Database) -> None:
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа")
+        return
+    chat_id = int(callback.data.rsplit(":", 1)[1])
+    text = await _render_user_card(chat_id, db)
+    if text is None:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_user_kb(chat_id))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:user_debug:"))
+async def cb_admin_user_debug(callback: CallbackQuery, db: Database) -> None:
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа")
+        return
+    chat_id = int(callback.data.rsplit(":", 1)[1])
+    text = await _render_user_debug(chat_id, db)
+    if text is None:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="◀️ Назад", callback_data="adm:refresh")
+        InlineKeyboardButton(text="◀️ К пользователю", callback_data=f"adm:user:{chat_id}")
     ]])
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:user_ping:"))
+async def cb_admin_user_ping(callback: CallbackQuery, db: Database, metrics: Metrics) -> None:
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа")
+        return
+    chat_id = int(callback.data.rsplit(":", 1)[1])
+    item = utils.PendingDelivery(
+        kind="broadcast",
+        chat_id=chat_id,
+        text=(
+            "🧪 <b>Тест из админки</b>\n"
+            f"<code>{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}</code>"
+        ),
+        parse_mode="HTML",
+        dedupe_key=("admin_ping", callback.from_user.id, chat_id, int(time.time())),
+    )
+    result = await utils.send_delivery(callback.bot, item)
+    if result.status == "success":
+        await callback.answer("Тестовое сообщение отправлено")
+        return
+    if result.status == "blocked":
+        await db.deactivate_user(chat_id)
+        metrics.blocked_users.inc()
+        await callback.answer("Пользователь заблокировал бота", show_alert=True)
+        return
+    await callback.answer(f"Не удалось отправить: {result.error[:80]}", show_alert=True)
 
 
 # ── Metrics panel ─────────────────────────────────────────────────────────────
@@ -184,6 +350,7 @@ async def cb_metrics(callback: CallbackQuery, metrics: Metrics) -> None:
         return
 
     m        = metrics.summary()
+    fallback = utils.fallback_stats()
     top_cmds = "\n".join(f"  /{c}: {n}" for c, n in m["top_commands"]) or "  —"
 
     text = (
@@ -198,7 +365,8 @@ async def cb_metrics(callback: CallbackQuery, metrics: Metrics) -> None:
         f"  L2 попаданий: {m['cache_l2_hits']}\n"
         f"  Промахов (→ API): {m['cache_misses']}\n"
         f"  API запросов всего: {m['api_requests']}\n"
-        f"  API ошибок: {m['api_errors']}\n\n"
+        f"  API ошибок: {m['api_errors']}\n"
+        f"  Fallback на stale cache: {fallback['count']}\n\n"
         f"<b>🔔 Уведомления:</b>\n"
         f"  Отправлено: {m['notifications_sent']}\n"
         f"  Ошибок: {m['notifications_failed']}\n"
@@ -343,7 +511,6 @@ async def cb_warmup(
         await callback.answer("Нет доступа")
         return
     await callback.answer("⏳ Прогреваю кэш...")
-    import utils
     await utils.warm_up(mem, db)
     await callback.answer("✅ Кэш прогрет")
 
@@ -372,31 +539,85 @@ async def cmd_broadcast(message: Message, db: Database, metrics: Metrics) -> Non
     )
 
     sent = failed = blocked = 0
+    queued = 0
     bot  = message.bot
+    batch_id = int(time.time())
 
     for user in users:
-        try:
-            await bot.send_message(
-                user["chat_id"], text, parse_mode="HTML"
-            )
+        item = utils.PendingDelivery(
+            kind="broadcast",
+            chat_id=user["chat_id"],
+            text=text,
+            parse_mode="HTML",
+            dedupe_key=("broadcast", batch_id, user["chat_id"]),
+        )
+        result = await utils.send_delivery(bot, item)
+        if result.status == "success":
             sent += 1
-        except Exception as exc:
-            err = str(exc).lower()
-            if "forbidden" in err or "blocked" in err or "deactivated" in err:
-                await db.deactivate_user(user["chat_id"])
-                metrics.blocked_users.inc()
-                blocked += 1
+        elif result.status == "blocked":
+            await db.deactivate_user(user["chat_id"])
+            metrics.blocked_users.inc()
+            blocked += 1
+        else:
+            item.attempts = 1
+            item.last_error = result.error
+            delay = result.retry_delay or 60
+            if utils.delivery_queue.enqueue(item, delay_seconds=delay):
+                queued += 1
             else:
                 failed += 1
+                metrics.notifications_failed.inc()
+                metrics.record_error("broadcast", result.error or "broadcast delivery failed")
+                log.error(
+                    "Broadcast queue rejected for %d: %s",
+                    user["chat_id"], result.error,
+                )
         await asyncio.sleep(TELEGRAM_SEND_DELAY)
 
     await status_msg.edit_text(
         f"📢 <b>Рассылка завершена</b>\n\n"
         f"✅ Отправлено: {sent}\n"
+        f"⏳ В очереди на retry: {queued}\n"
         f"🚫 Заблокировали бота: {blocked}\n"
         f"❌ Ошибок: {failed}",
         parse_mode="HTML",
     )
     log.info(
-        "Broadcast done: sent=%d blocked=%d failed=%d", sent, blocked, failed
+        "Broadcast done: sent=%d queued=%d blocked=%d failed=%d",
+        sent, queued, blocked, failed,
+    )
+
+
+@router.message(Command("admin_send"))
+async def cmd_admin_send(message: Message, db: Database, metrics: Metrics) -> None:
+    if not _is_admin(message):
+        return
+    try:
+        chat_id, body = _parse_admin_send_args(message.text)
+    except Exception:
+        await message.answer(
+            "Использование: <code>/admin_send CHAT_ID текст сообщения</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    item = utils.PendingDelivery(
+        kind="broadcast",
+        chat_id=chat_id,
+        text=body,
+        parse_mode="HTML",
+        dedupe_key=("admin_send", message.from_user.id, chat_id, int(time.time())),
+    )
+    result = await utils.send_delivery(message.bot, item)
+    if result.status == "success":
+        await message.answer(f"✅ Сообщение отправлено пользователю <code>{chat_id}</code>", parse_mode="HTML")
+        return
+    if result.status == "blocked":
+        await db.deactivate_user(chat_id)
+        metrics.blocked_users.inc()
+        await message.answer("🚫 Пользователь заблокировал бота.")
+        return
+    await message.answer(
+        f"❌ Не удалось отправить пользователю <code>{chat_id}</code>: <code>{escape(result.error[:120])}</code>",
+        parse_mode="HTML",
     )

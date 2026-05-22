@@ -2,7 +2,7 @@
 Scheduler jobs:
   cache_warmup    — каждый час :00  — прогрев L1+L2
   notifications   — каждый час :05  — уведомления о гонках
-  weekly_digest   — каждый пн  :10  — еженедельный дайджест
+  weekly_digest   — каждые 5 мин — еженедельный дайджест по локальному времени пользователя
   db_cleanup      — каждое вс  04:00 — sent_notifications > 30 дней
 
 Оптимизации:
@@ -16,14 +16,16 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram import Bot
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+import pytz
 
 from database import Database
 from utils.cache import MemoryCache
+from utils.health import RuntimeState
 from utils.metrics import Metrics
 from config import (
     NOTIFICATION_OFFSETS,
@@ -38,37 +40,52 @@ from utils.windows import week_window
 log = logging.getLogger(__name__)
 
 Row = dict
+_DIGEST_WINDOW_SECONDS = 5 * 60
+_RETRY_BASE_DELAY_SECONDS = 60
+_RETRY_MAX_ATTEMPTS = 4
 
 
 def make_scheduler(
-    bot: Bot, db: Database, mem: MemoryCache, metrics: Metrics
+    bot: Bot, db: Database, mem: MemoryCache, metrics: Metrics, state: RuntimeState
 ) -> AsyncIOScheduler:
     grace = {"misfire_grace_time": SCHEDULER_MISFIRE_GRACE}
     scheduler = AsyncIOScheduler()
 
     scheduler.add_job(
         _cache_warmup_job,
-        args=(mem, db),
+        args=(mem, db, state),
         trigger="cron", hour="*", minute=0,
         id="cache_warmup", replace_existing=True, **grace,
     )
     scheduler.add_job(
         _notifications_job,
-        args=(bot, db, mem, metrics),
+        args=(bot, db, mem, metrics, state),
         trigger="cron", hour="*", minute=5,
         id="notifications", replace_existing=True, **grace,
     )
     scheduler.add_job(
         _weekly_digest_job,
-        args=(bot, db, mem, metrics),
-        trigger="cron", day_of_week="mon", hour=10, minute=0,
+        args=(bot, db, mem, metrics, state),
+        trigger="cron", minute="*/5",
         id="weekly_digest", replace_existing=True, **grace,
     )
     scheduler.add_job(
         _db_cleanup_job,
-        args=(db,),
+        args=(db, state),
         trigger="cron", day_of_week="sun", hour=4, minute=0,
         id="db_cleanup", replace_existing=True, **grace,
+    )
+    scheduler.add_job(
+        _retry_delivery_job,
+        args=(bot, db, metrics, state),
+        trigger="cron", minute="*",
+        id="retry_delivery", replace_existing=True, **grace,
+    )
+    scheduler.add_job(
+        _session_reminders_job,
+        args=(bot, db, mem, metrics, state),
+        trigger="cron", minute="*",
+        id="session_reminders", replace_existing=True, **grace,
     )
 
     return scheduler
@@ -119,64 +136,80 @@ def _sessions_for_user(
 
 # ── Send helper ───────────────────────────────────────────────────────────────
 
-async def _safe_send(
-    bot:     Bot,
-    chat_id: int,
-    text:    str,
-    kb:      InlineKeyboardMarkup,
-    db:      Database,
-    metrics: Metrics,
-) -> bool:
-    """
-    Send one notification. Returns True on success.
-    Handles TelegramForbiddenError (deactivates user) and
-    TelegramRetryAfter (waits and retries once).
-    """
-    async def _do_send() -> None:
-        await bot.send_message(
-            chat_id, text,
-            parse_mode="HTML", reply_markup=kb,
-            disable_web_page_preview=True,
-        )
+def _retry_delay(attempt: int) -> int:
+    return _RETRY_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1))
 
-    try:
-        await _do_send()
+
+async def _process_delivery(
+    bot: Bot,
+    db: Database,
+    metrics: Metrics,
+    item: utils.PendingDelivery,
+    *,
+    allow_queue: bool,
+) -> bool:
+    result = await utils.send_delivery(bot, item)
+
+    if result.status == "success":
         await asyncio.sleep(TELEGRAM_SEND_DELAY)
+        if item.kind == "notification" and item.session_id and item.notif_type:
+            await db.mark_notified_batch([(item.chat_id, item.session_id, item.notif_type)])
+            metrics.notifications_sent.inc()
+        elif item.kind == "digest" and item.digest_session_ids:
+            await db.mark_notified_batch(
+                [(item.chat_id, session_id, "digest") for session_id in item.digest_session_ids]
+            )
+            metrics.digests_sent.inc()
+        elif item.kind == "session_reminder" and item.session_id and item.remind_type:
+            await db.remove_session_reminder(item.chat_id, item.session_id, item.remind_type)
+            metrics.notifications_sent.inc()
+        log.info("Delivered %s → %d", item.kind, item.chat_id)
         return True
 
-    except TelegramForbiddenError:
-        await db.deactivate_user(chat_id)
+    if result.status == "blocked":
+        await db.deactivate_user(item.chat_id)
         metrics.blocked_users.inc()
-        metrics.record_error("scheduler", f"User {chat_id} blocked bot")
+        metrics.record_error(item.kind, f"User {item.chat_id} blocked bot")
+        log.info("Delivery blocked by user %d for %s", item.chat_id, item.kind)
         return False
 
-    except TelegramRetryAfter as exc:
-        log.warning("Telegram rate limit: retry after %ds", exc.retry_after)
-        await asyncio.sleep(exc.retry_after + 1)
-        try:
-            await _do_send()
-            await asyncio.sleep(TELEGRAM_SEND_DELAY)
-            return True
-        except Exception as e2:
-            log.error("Retry also failed for %d: %s", chat_id, e2)
-            metrics.notifications_failed.inc()
-            metrics.record_error("scheduler_retry", str(e2))
-            return False
+    item.attempts += 1
+    item.last_error = result.error
+    if item.attempts <= _RETRY_MAX_ATTEMPTS and allow_queue:
+        delay = result.retry_delay or _retry_delay(item.attempts)
+        queued = utils.delivery_queue.enqueue(item, delay_seconds=delay)
+        if queued:
+            log.warning(
+                "Queued %s → %d for retry in %.0fs (attempt %d/%d): %s",
+                item.kind, item.chat_id, delay, item.attempts, _RETRY_MAX_ATTEMPTS, result.error,
+            )
+        return False
 
-    except Exception as exc:
-        log.error("Failed to send to %d: %s", chat_id, exc)
+    if item.attempts > _RETRY_MAX_ATTEMPTS:
         metrics.notifications_failed.inc()
-        metrics.record_error("scheduler", str(exc))
-        return False
+        metrics.record_error(item.kind, result.error or "delivery failed")
+        log.error(
+            "Delivery failed permanently for %s → %d after %d attempts: %s",
+            item.kind, item.chat_id, item.attempts, result.error,
+        )
+    return False
 
 
 # ── Cache warm-up ─────────────────────────────────────────────────────────────
 
-async def _cache_warmup_job(mem: MemoryCache, db: Database) -> None:
+async def _cache_warmup_job(mem: MemoryCache, db: Database, state: RuntimeState) -> None:
+    started_at = time.time()
     try:
-        await utils.warm_up(mem, db)
-        log.info("Cache warm-up done")
+        ok = await utils.warm_up(mem, db)
+        if ok:
+            state.mark_job_success("cache_warmup", int((time.time() - started_at) * 1000))
+            log.info("Cache warm-up done")
+        else:
+            state.mark_job_failure(
+                "cache_warmup", "warm-up failed", int((time.time() - started_at) * 1000)
+            )
     except Exception as exc:
+        state.mark_job_failure("cache_warmup", str(exc), int((time.time() - started_at) * 1000))
         log.error("Cache warm-up failed: %s", exc)
 
 
@@ -212,10 +245,158 @@ def _allows_session_type(session: Row, subs: list[Row]) -> bool:
     return True
 
 
+def _in_quiet_hours(now_ts: int, user: Row) -> bool:
+    if not user.get("quiet_enabled", 0):
+        return False
+
+    start = int(user.get("quiet_start", 23))
+    end = int(user.get("quiet_end", 7))
+    local_hour = datetime.fromtimestamp(
+        now_ts, tz=timezone.utc
+    ).astimezone(pytz.timezone(user["timezone"])).hour
+
+    if start == end:
+        return True
+    if start < end:
+        return start <= local_hour < end
+    return local_hour >= start or local_hour < end
+
+
+def _digest_due_now(now_ts: int, user: Row) -> bool:
+    tz = pytz.timezone(user["timezone"])
+    local_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc).astimezone(tz)
+    if local_dt.weekday() != 0:
+        return False
+
+    try:
+        hh_raw, mm_raw = str(user.get("digest_time", "08:00")).split(":", 1)
+        digest_hour = int(hh_raw)
+        digest_minute = int(mm_raw)
+    except Exception:
+        digest_hour, digest_minute = 8, 0
+
+    scheduled = local_dt.replace(
+        hour=digest_hour,
+        minute=digest_minute,
+        second=0,
+        microsecond=0,
+    )
+    delta = abs((local_dt - scheduled).total_seconds())
+    return delta < _DIGEST_WINDOW_SECONDS
+
+
+async def _retry_delivery_job(bot: Bot, db: Database, metrics: Metrics, state: RuntimeState) -> None:
+    started_at = time.time()
+    due = utils.delivery_queue.pop_due()
+    if not due:
+        state.mark_job_success("retry_delivery", int((time.time() - started_at) * 1000))
+        return
+
+    log.info("Retry queue: processing %d pending deliveries", len(due))
+    for item in due:
+        result = await utils.send_delivery(bot, item)
+        if result.status == "success":
+            await asyncio.sleep(TELEGRAM_SEND_DELAY)
+            if item.kind == "notification" and item.session_id and item.notif_type:
+                await db.mark_notified_batch([(item.chat_id, item.session_id, item.notif_type)])
+                metrics.notifications_sent.inc()
+            elif item.kind == "digest" and item.digest_session_ids:
+                await db.mark_notified_batch(
+                    [(item.chat_id, session_id, "digest") for session_id in item.digest_session_ids]
+                )
+                metrics.digests_sent.inc()
+            elif item.kind == "session_reminder" and item.session_id and item.remind_type:
+                await db.remove_session_reminder(item.chat_id, item.session_id, item.remind_type)
+                metrics.notifications_sent.inc()
+            elif item.kind == "broadcast":
+                log.info("Broadcast delivery retried successfully for %d", item.chat_id)
+            utils.delivery_queue.complete(item)
+            continue
+        if result.status == "blocked":
+            await db.deactivate_user(item.chat_id)
+            metrics.blocked_users.inc()
+            metrics.record_error(item.kind, f"User {item.chat_id} blocked bot")
+            utils.delivery_queue.complete(item)
+            continue
+
+        item.attempts += 1
+        item.last_error = result.error
+        if item.attempts > _RETRY_MAX_ATTEMPTS:
+            metrics.notifications_failed.inc()
+            metrics.record_error(item.kind, result.error or "delivery failed")
+            log.error(
+                "Delivery failed permanently for %s → %d after %d attempts: %s",
+                item.kind, item.chat_id, item.attempts, result.error,
+            )
+            utils.delivery_queue.complete(item)
+            continue
+
+        delay = result.retry_delay or _retry_delay(item.attempts)
+        utils.delivery_queue.requeue(item, delay_seconds=delay)
+        log.warning(
+            "Requeued %s → %d for retry in %.0fs (attempt %d/%d): %s",
+            item.kind, item.chat_id, delay, item.attempts, _RETRY_MAX_ATTEMPTS, item.last_error,
+        )
+    state.mark_job_success("retry_delivery", int((time.time() - started_at) * 1000))
+
+
+async def _session_reminders_job(
+    bot: Bot, db: Database, mem: MemoryCache, metrics: Metrics, state: RuntimeState
+) -> None:
+    started_at = time.time()
+    now_ts = int(started_at)
+    rows = await db.get_due_session_reminders(now_ts)
+    if not rows:
+        state.mark_job_success("session_reminders", int((time.time() - started_at) * 1000))
+        return
+
+    sent_count = 0
+    for row in rows:
+        user = await db.get_user(row["chat_id"])
+        if not user:
+            continue
+        session, broadcasts, live_timings = await utils.load_session_context(db, mem, row["session_id"])
+        if not session:
+            await db.remove_session_reminder(row["chat_id"], row["session_id"], row["remind_type"])
+            continue
+
+        user_langs = json.loads(user.get("preferred_langs", '["English"]'))
+        labels = {
+            "1day": "🔔 Напоминание по сессии: старт через сутки",
+            "1hour": "🚨 Напоминание по сессии: старт через час",
+            "start": "🏁 Напоминание по сессии: старт сейчас",
+        }
+        text = (
+            f"{labels.get(row['remind_type'], '🔔 Напоминание по сессии')}\n\n"
+            f"{utils.session_card(session, broadcasts, live_timings, user['timezone'], user_langs) or session.get('name', 'Сессия')}"
+        )
+        dedupe_key = ("session_reminder", row["chat_id"], row["session_id"], row["remind_type"])
+        if utils.delivery_queue.has(dedupe_key):
+            continue
+        item = utils.PendingDelivery(
+            kind="session_reminder",
+            chat_id=row["chat_id"],
+            text=text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="📋 Подробнее", callback_data=f"session:{row['session_id']}"),
+            ]]),
+            dedupe_key=dedupe_key,
+            session_id=row["session_id"],
+            remind_type=row["remind_type"],
+        )
+        ok = await _process_delivery(bot, db, metrics, item, allow_queue=True)
+        if ok:
+            sent_count += 1
+
+    elapsed = time.time() - started_at
+    state.mark_job_success("session_reminders", int(elapsed * 1000))
+    log.info("Session reminders job done in %.2fs — sent %d/%d", elapsed, sent_count, len(rows))
+
+
 # ── Notifications job ─────────────────────────────────────────────────────────
 
 async def _notifications_job(
-    bot: Bot, db: Database, mem: MemoryCache, metrics: Metrics
+    bot: Bot, db: Database, mem: MemoryCache, metrics: Metrics, state: RuntimeState
 ) -> None:
     t_start = time.time()
     now     = int(t_start)
@@ -228,6 +409,7 @@ async def _notifications_job(
         all_broadcasts = await utils.get_broadcasts(mem, db, n_start)
         metrics.api_requests.inc(2)
     except Exception as exc:
+        state.mark_job_failure("notifications", str(exc), int((time.time() - t_start) * 1000))
         log.error("Notification job: API fetch failed: %s", exc)
         metrics.api_errors.inc()
         metrics.record_error("notifications_job", str(exc))
@@ -243,8 +425,7 @@ async def _notifications_job(
     series_idx, class_idx = _build_session_index(all_sessions)
 
     # ── Accumulate new notifications to batch-write ───────────────────────────
-    to_send:   list[tuple[int, Row, str, list, list[str]]] = []
-    to_mark:   list[tuple[int, str, str]] = []
+    to_send: list[tuple[int, Row, str, list, list[str]]] = []
 
     for user in all_users:
         chat_id    = user["chat_id"]
@@ -255,6 +436,8 @@ async def _notifications_job(
         series_ids = {s["ref_id"] for s in subs if s["type"] == "series"}
         class_ids  = {s["ref_id"] for s in subs if s["type"] == "vehicle_class"}
         user_langs = json.loads(user.get("preferred_langs", '["English"]'))
+        if _in_quiet_hours(now, user):
+            continue
 
         sessions = _sessions_for_user(series_ids, class_ids, series_idx, class_idx)
 
@@ -280,13 +463,15 @@ async def _notifications_job(
                 if not _allows_session_type(session, subs):
                     continue
 
+                if not user.get("show_no_broadcast", 1) and not bc_map.get(sid):
+                    continue
+
                 to_send.append((chat_id, session, notif_type, bc_map.get(sid, []), user_langs))
-                to_mark.append(key)
                 sent_set.add(key)  # prevent duplicates within same run
 
     log.info("Notifications to send: %d", len(to_send))
 
-    # ── Send with rate limiting ───────────────────────────────────────────────
+    # ── Send with retries / queue fallback ────────────────────────────────────
     sent_count = 0
     for chat_id, session, notif_type, broadcasts, user_langs in to_send:
         user = next((u for u in all_users if u["chat_id"] == chat_id), None)
@@ -295,29 +480,37 @@ async def _notifications_job(
 
         text = utils.notification_text(
             session,
-            notif_type=notif_type,
             broadcasts=broadcasts,
+            live_timings=[],
             user_tz=user["timezone"],
             user_langs=user_langs,
+            notif_type=notif_type,
         )
         sid = session.get("id", "")
-        kb  = InlineKeyboardMarkup(inline_keyboard=[[
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="📋 Подробнее", callback_data=f"session:{sid}"),
         ]])
-
-        ok = await _safe_send(bot, chat_id, text, kb, db, metrics)
+        dedupe_key = ("notification", chat_id, sid, notif_type)
+        if utils.delivery_queue.has(dedupe_key):
+            continue
+        item = utils.PendingDelivery(
+            kind="notification",
+            chat_id=chat_id,
+            text=text,
+            reply_markup=kb,
+            dedupe_key=dedupe_key,
+            session_id=sid,
+            notif_type=notif_type,
+        )
+        ok = await _process_delivery(bot, db, metrics, item, allow_queue=True)
         if ok:
             sent_count += 1
-            metrics.notifications_sent.inc()
             log.info(
                 "Sent %s → %d (%s)", notif_type, chat_id, sid[:8]
             )
 
-    # ── Batch-write sent notifications ────────────────────────────────────────
-    if to_mark:
-        await db.mark_notified_batch(to_mark)
-
     elapsed = time.time() - t_start
+    state.mark_job_success("notifications", int(elapsed * 1000))
     log.info(
         "Notification job done in %.2fs — sent %d/%d",
         elapsed, sent_count, len(to_send),
@@ -327,17 +520,19 @@ async def _notifications_job(
 # ── Weekly digest job ─────────────────────────────────────────────────────────
 
 async def _weekly_digest_job(
-    bot: Bot, db: Database, mem: MemoryCache, metrics: Metrics
+    bot: Bot, db: Database, mem: MemoryCache, metrics: Metrics, state: RuntimeState
 ) -> None:
     t_start        = time.time()
+    now_ts         = int(t_start)
     w_start, w_end = week_window()
-    label          = utils.week_label(w_start)
+    label          = utils.week_label(w_start, w_end)
 
     try:
         all_sessions   = await utils.get_sessions(mem, db, w_start, w_end)
         all_broadcasts = await utils.get_broadcasts(mem, db, w_start)
         metrics.api_requests.inc(2)
     except Exception as exc:
+        state.mark_job_failure("weekly_digest", str(exc), int((time.time() - t_start) * 1000))
         log.error("Weekly digest: API fetch failed: %s", exc)
         metrics.api_errors.inc()
         metrics.record_error("weekly_digest", str(exc))
@@ -350,11 +545,13 @@ async def _weekly_digest_job(
 
     series_idx, class_idx = _build_session_index(all_sessions)
 
-    successfully_marked: list[tuple[int, str, str]] = []
+    sent_count = 0
 
     for user in all_users:
         chat_id = user["chat_id"]
         if not user.get("digest_enabled", 0):
+            continue
+        if not _digest_due_now(now_ts, user):
             continue
 
         subs = all_subs.get(chat_id, [])
@@ -372,53 +569,44 @@ async def _weekly_digest_job(
             if ("digest", s["id"]) not in {(k[2], k[1]) for k in sent_set if k[0] == chat_id}
         ]
 
-        try:
-            messages = utils.build_digest(
-                new_sessions, bc_map, {},
-                user_tz=user["timezone"],
-                user_langs=user_langs,
-                show_no_bc=bool(user.get("show_no_broadcast", 1)),
-                header=f"📆 <b>Гонки на неделю</b> — {label}",
-            )
+        messages = utils.build_digest(
+            new_sessions, bc_map, {},
+            user_tz=user["timezone"],
+            user_langs=user_langs,
+            show_no_bc=bool(user.get("show_no_broadcast", 1)),
+            header=f"📆 <b>Гонки на неделю</b> — {label}",
+        )
 
-            from utils.kb import week_pager, back_to_menu
-            reply_markup = (
-                week_pager(0, len(messages))
-                if len(messages) > 1
-                else back_to_menu()
-            )
-            await bot.send_message(
-                chat_id, messages[0],
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=reply_markup,
-            )
-            await asyncio.sleep(TELEGRAM_SEND_DELAY)
+        from utils.kb import week_pager, back_to_menu
+        reply_markup = (
+            week_pager(0, len(messages))
+            if len(messages) > 1
+            else back_to_menu()
+        )
+        dedupe_key = ("digest", chat_id, tuple(sorted(s["id"] for s in new_sessions)))
+        if utils.delivery_queue.has(dedupe_key):
+            continue
+        item = utils.PendingDelivery(
+            kind="digest",
+            chat_id=chat_id,
+            text=messages[0],
+            reply_markup=reply_markup,
+            dedupe_key=dedupe_key,
+            digest_session_ids=tuple(s["id"] for s in new_sessions),
+        )
+        ok = await _process_delivery(bot, db, metrics, item, allow_queue=True)
+        if ok:
+            sent_count += 1
 
-            for s in new_sessions:
-                successfully_marked.append((chat_id, s["id"], "digest"))
-            metrics.digests_sent.inc()
-
-        except TelegramForbiddenError:
-            await db.deactivate_user(chat_id)
-            metrics.blocked_users.inc()
-
-        except TelegramRetryAfter as exc:
-            log.warning("Rate limit during digest: sleeping %ds", exc.retry_after)
-            await asyncio.sleep(exc.retry_after + 1)
-
-        except Exception as exc:
-            log.error("Digest failed for %d: %s", chat_id, exc)
-            metrics.record_error("weekly_digest", str(exc))
-
-    if successfully_marked:
-        await db.mark_notified_batch(successfully_marked)
-
-    log.info("Weekly digest done — sent to %d users", len(successfully_marked))
+    elapsed = time.time() - t_start
+    state.mark_job_success("weekly_digest", int(elapsed * 1000))
+    log.info("Weekly digest done in %.2fs — sent to %d users", elapsed, sent_count)
 
 
 # ── DB cleanup job ────────────────────────────────────────────────────────────
 
-async def _db_cleanup_job(db: Database) -> None:
+async def _db_cleanup_job(db: Database, state: RuntimeState) -> None:
+    started_at = time.time()
     deleted = await db.cleanup_old_notifications()
+    state.mark_job_success("db_cleanup", int((time.time() - started_at) * 1000))
     log.info("DB cleanup: %d old sent_notifications removed", deleted)

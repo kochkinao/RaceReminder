@@ -24,13 +24,14 @@ from typing import Any
 
 import aiohttp
 
-from config import API_BASE_URL
+from config import API_BASE_URL, API_FALLBACK_STALE_SECONDS
 from database import Database
 from utils.cache import MemoryCache
 
 log = logging.getLogger(__name__)
 
 type ApiObject = dict[str, Any]
+_fallback_stats = {"count": 0, "last_at": 0.0, "last_key": ""}
 
 # ── TTLs ──────────────────────────────────────────────────────────────────────
 _TTL_SERIES   = 6 * 3_600
@@ -426,12 +427,24 @@ async def _cached(
         mem.set(key, data, ttl)
         return data
     log.info("API fetch: %s", key)
-    async with aiohttp.ClientSession() as http:
-        tok  = await _get_token(http)
-        data = await fetch_fn(http, tok)
-    mem.set(key, data, ttl)
-    await db.set_cache(key, json.dumps(data, ensure_ascii=False))
-    return data
+    try:
+        async with aiohttp.ClientSession() as http:
+            tok = await _get_token(http)
+            data = await fetch_fn(http, tok)
+        mem.set(key, data, ttl)
+        await db.set_cache(key, json.dumps(data, ensure_ascii=False))
+        return data
+    except Exception as exc:
+        stale_raw = await db.get_cache_stale(key, API_FALLBACK_STALE_SECONDS)
+        if stale_raw is None:
+            raise
+        _fallback_stats["count"] += 1
+        _fallback_stats["last_at"] = time.time()
+        _fallback_stats["last_key"] = key
+        log.warning("API fallback to stale cache for %s: %s", key, exc)
+        data = json.loads(stale_raw)
+        mem.set(key, data, min(ttl, 300))
+        return data
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -480,7 +493,7 @@ async def get_live_timings(session_id: str) -> list[ApiObject]:
 
 # ── Warm-up ───────────────────────────────────────────────────────────────────
 
-async def warm_up(mem: MemoryCache, db: Database) -> None:
+async def warm_up(mem: MemoryCache, db: Database) -> bool:
     from utils.windows import today_window, week_window, notify_window
 
     log.info("Cache warm-up started")
@@ -499,9 +512,11 @@ async def warm_up(mem: MemoryCache, db: Database) -> None:
 
         evicted = mem.evict_expired()
         log.info("Cache warm-up done. L1: %d entries (%d evicted)", mem.size(), evicted)
+        return True
 
     except Exception as exc:
         log.error("Warm-up failed: %s", exc)
+        return False
 
 
 # ── Domain helpers ────────────────────────────────────────────────────────────
@@ -534,3 +549,7 @@ def filter_sessions_for_user(
     result = [s for s in sessions if matches(s)]
     result.sort(key=lambda s: s.get("start", 0))
     return result
+
+
+def fallback_stats() -> dict[str, Any]:
+    return dict(_fallback_stats)

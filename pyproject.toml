@@ -14,5 +14,9 @@ dependencies = [
     "aiogram-calendar==0.6.0",
 ]
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [project.scripts]
 raceday-bot = "main:main_sync"

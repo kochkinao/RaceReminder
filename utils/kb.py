@@ -27,7 +27,20 @@ class FavCD(CallbackData, prefix="fav"):
 
 
 class RemindCD(CallbackData, prefix="remind"):
-    session_id: str
+    action: str = "menu"
+    session_id: str = ""
+    remind_type: str = ""
+
+
+class HistoryViewCD(CallbackData, prefix="histv"):
+    filter_type: str = "all"
+    ref_id: str = ""
+    page: int = 0
+
+
+class HistoryPickCD(CallbackData, prefix="histpick"):
+    kind: str
+    page: int = 0
 
 
 class ProfileToggleCD(CallbackData, prefix="ptoggle"):
@@ -63,7 +76,10 @@ def main_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔍 Поиск",      callback_data="search_prompt"),
         ],
         [
-            InlineKeyboardButton(text="📚 База знаний",callback_data="kb_menu"),
+            InlineKeyboardButton(text="📚 База знаний", callback_data="kb_menu"),
+            InlineKeyboardButton(text="❤️ Избранное", callback_data="favorites"),
+        ],
+        [
             InlineKeyboardButton(text="🔔 Квалы/практики", callback_data="subs:notify"),
         ],
         [InlineKeyboardButton(text="⚙️ Профиль",      callback_data="profile_menu")],
@@ -207,9 +223,126 @@ def session_actions(session_id: str, is_fav: bool) -> InlineKeyboardMarkup:
         ),
         InlineKeyboardButton(
             text="🔔 Напомнить",
-            callback_data=RemindCD(session_id=session_id).pack(),
+            callback_data=RemindCD(action="menu", session_id=session_id).pack(),
         ),
     ]])
+
+
+def reminder_menu(session_id: str, active_types: set[str]) -> InlineKeyboardMarkup:
+    def label(remind_type: str, title: str) -> str:
+        return f"{'✅ ' if remind_type in active_types else ''}{title}"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=label("1day", "За сутки"),
+            callback_data=RemindCD(action="toggle", session_id=session_id, remind_type="1day").pack(),
+        )],
+        [InlineKeyboardButton(
+            text=label("1hour", "За час"),
+            callback_data=RemindCD(action="toggle", session_id=session_id, remind_type="1hour").pack(),
+        )],
+        [InlineKeyboardButton(
+            text=label("start", "На старт"),
+            callback_data=RemindCD(action="toggle", session_id=session_id, remind_type="start").pack(),
+        )],
+        [InlineKeyboardButton(text="◀️ К сессии", callback_data=f"session:{session_id}")],
+    ])
+
+
+def history_filter_menu(
+    filter_type: str,
+    ref_id: str,
+    page: int,
+    total_pages: int,
+) -> InlineKeyboardMarkup:
+    def marker(value: str) -> str:
+        return "✅ " if filter_type == value else ""
+
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{marker('all')}Все",
+                callback_data=HistoryViewCD(filter_type="all", page=0).pack(),
+            ),
+            InlineKeyboardButton(
+                text=f"{marker('race')}Гонки",
+                callback_data=HistoryViewCD(filter_type="race", page=0).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{marker('qualifying')}Квалы",
+                callback_data=HistoryViewCD(filter_type="qualifying", page=0).pack(),
+            ),
+            InlineKeyboardButton(
+                text=f"{marker('practice')}Практики",
+                callback_data=HistoryViewCD(filter_type="practice", page=0).pack(),
+            ),
+        ],
+        [
+            InlineKeyboardButton(text="🏎️ По серии", callback_data=HistoryPickCD(kind="series", page=0).pack()),
+            InlineKeyboardButton(text="🏷️ По классу", callback_data=HistoryPickCD(kind="vehicle_class", page=0).pack()),
+        ],
+    ]
+
+    if filter_type in {"series", "vehicle_class"} and ref_id:
+        rows.append([
+            InlineKeyboardButton(
+                text="❌ Сбросить фильтр",
+                callback_data=HistoryViewCD(filter_type="all", page=0).pack(),
+            )
+        ])
+
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="◀️",
+                callback_data=HistoryViewCD(filter_type=filter_type, ref_id=ref_id, page=page - 1).pack(),
+            ))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page + 1 < total_pages:
+            nav.append(InlineKeyboardButton(
+                text="▶️",
+                callback_data=HistoryViewCD(filter_type=filter_type, ref_id=ref_id, page=page + 1).pack(),
+            ))
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def history_pick_menu(
+    kind: str,
+    items: list[dict],
+    page: int = 0,
+    page_size: int = 8,
+) -> InlineKeyboardMarkup:
+    chunk = items[page * page_size: (page + 1) * page_size]
+    rows = []
+    filter_type = "series" if kind == "series" else "vehicle_class"
+    for item in chunk:
+        rows.append([InlineKeyboardButton(
+            text=item.get("ref_name", item.get("name", "?"))[:48],
+            callback_data=HistoryViewCD(
+                filter_type=filter_type,
+                ref_id=item["ref_id"],
+                page=0,
+            ).pack(),
+        )])
+
+    total = (len(items) - 1) // page_size + 1 if items else 1
+    if total > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀️", callback_data=HistoryPickCD(kind=kind, page=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total}", callback_data="noop"))
+        if page + 1 < total:
+            nav.append(InlineKeyboardButton(text="▶️", callback_data=HistoryPickCD(kind=kind, page=page + 1).pack()))
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text="◀️ К истории", callback_data="history")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def profile_menu(user: dict) -> InlineKeyboardMarkup:

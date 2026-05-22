@@ -23,9 +23,7 @@ _TOGGLE_FIELDS = {
 
 async def _show_profile(target: Message | CallbackQuery, db: Database) -> None:
     chat_id = target.from_user.id
-    user = await db.get_user(chat_id)
-    if not user:
-        return
+    user = await db.get_or_create_user(chat_id)
 
     langs = json.loads(user.get("preferred_langs", '["English"]'))
     text = (
@@ -68,7 +66,7 @@ async def cb_toggle(
     if field not in _TOGGLE_FIELDS:
         await callback.answer("Неизвестная настройка")
         return
-    user = await db.get_user(callback.from_user.id)
+    user = await db.get_or_create_user(callback.from_user.id)
     await db.update_user(callback.from_user.id, **{field: 0 if user[field] else 1})
     await _show_profile(callback, db)
 
@@ -77,7 +75,7 @@ async def cb_toggle(
 
 @router.callback_query(F.data == "profile:langs")
 async def cb_langs(callback: CallbackQuery, db: Database) -> None:
-    user = await db.get_user(callback.from_user.id)
+    user = await db.get_or_create_user(callback.from_user.id)
     current = json.loads(user.get("preferred_langs", '["English"]'))
     await callback.message.edit_text(
         "🌐 <b>Языки трансляций</b>\nМожно выбрать несколько:",
@@ -93,7 +91,7 @@ async def cb_toggle_lang(
     callback_data: utils.LangToggleCD,
     db: Database,
 ) -> None:
-    user = await db.get_user(callback.from_user.id)
+    user = await db.get_or_create_user(callback.from_user.id)
     current: list[str] = json.loads(user.get("preferred_langs", '["English"]'))
     lang_id = callback_data.lang_id
 

@@ -39,7 +39,7 @@ async def _render_reminder_menu(
     active_types = {row["remind_type"] for row in reminders}
     start_ts = session.get("start", 0)
     title = session.get("name", "Сессия")
-    user = await db.get_user(callback.from_user.id)
+    user = await db.get_or_create_user(callback.from_user.id)
     text = (
         f"🔔 <b>Персональные напоминания</b>\n\n"
         f"<b>{title}</b>\n"
@@ -61,10 +61,7 @@ async def _render_session(
     session_id: str,
     notice: str | None = None,
 ) -> None:
-    user = await db.get_user(callback.from_user.id)
-    if not user:
-        await callback.answer("Пользователь не найден", show_alert=True)
-        return
+    user = await db.get_or_create_user(callback.from_user.id)
 
     session, broadcasts, live_timings = await utils.load_session_context(db, mem, session_id)
     if not session:

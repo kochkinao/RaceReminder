@@ -318,14 +318,14 @@ async def cmd_today(message: Message, db: Database, mem: MemoryCache) -> None:
 @router.callback_query(F.data == "today")
 async def cb_today(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
     await callback.answer("Загружаю...")
-    await _handle_today(callback.message, db, mem, as_edit=True)
+    await _handle_today(callback.message, db, mem, chat_id=callback.from_user.id, as_edit=True)
 
 
 @router.callback_query(F.data.startswith("today_page:"))
 async def cb_today_page(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
     await callback.answer()
     page = int(callback.data.split(":", 1)[1])
-    await _handle_today(callback.message, db, mem, page=page, action="view", as_edit=True)
+    await _handle_today(callback.message, db, mem, page=page, action="view", chat_id=callback.from_user.id, as_edit=True)
 
 
 async def _toggle_digest_subscription(
@@ -351,6 +351,7 @@ async def _toggle_digest_subscription(
             scope=callback_data.scope,
             ref_id=callback_data.ref_id,
             action="view",
+            chat_id=callback.from_user.id,
             as_edit=True,
         )
     else:
@@ -362,6 +363,7 @@ async def _toggle_digest_subscription(
             scope=callback_data.scope,
             ref_id=callback_data.ref_id,
             action="view",
+            chat_id=callback.from_user.id,
             as_edit=True,
         )
     await callback.answer("Настройка обновлена")
@@ -385,6 +387,7 @@ async def cb_today_digest(
         scope=callback_data.scope,
         ref_id=callback_data.ref_id,
         action=callback_data.action,
+        chat_id=callback.from_user.id,
         as_edit=True,
     )
     await callback.answer()
@@ -398,13 +401,15 @@ async def _handle_today(
     scope: str = "all",
     ref_id: str = "",
     action: str = "pick",
+    chat_id: int | None = None,
     as_edit: bool = False,
 ) -> None:
     from datetime import datetime, timezone
-    user          = await db.get_user(target.chat.id)
+    chat_id = chat_id or target.chat.id
+    user          = await db.get_or_create_user(chat_id)
     t_start, t_end = utils.today_window()
-    series_ids, class_ids = await _subs_ids(db, target.chat.id)
-    subs = await db.get_subscriptions(target.chat.id)
+    series_ids, class_ids = await _subs_ids(db, chat_id)
+    subs = await db.get_subscriptions(chat_id)
 
     all_sessions   = await utils.get_sessions(mem, db, t_start, t_end)
     all_broadcasts = await utils.get_broadcasts(mem, db, t_start)
@@ -452,14 +457,14 @@ async def cmd_week(message: Message, db: Database, mem: MemoryCache) -> None:
 @router.callback_query(F.data == "week")
 async def cb_week(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
     await callback.answer("Загружаю...")
-    await _handle_week(callback.message, db, mem, as_edit=True)
+    await _handle_week(callback.message, db, mem, chat_id=callback.from_user.id, as_edit=True)
 
 
 @router.callback_query(F.data.startswith("week_page:"))
 async def cb_week_page(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
     await callback.answer()
     page = int(callback.data.split(":", 1)[1])
-    await _handle_week(callback.message, db, mem, page=page, action="view", as_edit=True)
+    await _handle_week(callback.message, db, mem, page=page, action="view", chat_id=callback.from_user.id, as_edit=True)
 
 
 @router.callback_query(utils.DigestViewCD.filter(F.kind == "week"))
@@ -480,6 +485,7 @@ async def cb_week_digest(
         scope=callback_data.scope,
         ref_id=callback_data.ref_id,
         action=callback_data.action,
+        chat_id=callback.from_user.id,
         as_edit=True,
     )
     await callback.answer()
@@ -493,12 +499,14 @@ async def _handle_week(
     scope: str = "all",
     ref_id: str = "",
     action: str = "pick",
+    chat_id: int | None = None,
     as_edit: bool = False,
 ) -> None:
-    user = await db.get_user(target.chat.id)
+    chat_id = chat_id or target.chat.id
+    user = await db.get_or_create_user(chat_id)
     w_start, w_end = utils.week_window()
-    series_ids, class_ids = await _subs_ids(db, target.chat.id)
-    subs = await db.get_subscriptions(target.chat.id)
+    series_ids, class_ids = await _subs_ids(db, chat_id)
+    subs = await db.get_subscriptions(chat_id)
 
     all_sessions   = await utils.get_sessions(mem, db, w_start, w_end)
     all_broadcasts = await utils.get_broadcasts(mem, db, w_start)
@@ -533,7 +541,7 @@ async def cmd_history(message: Message, db: Database, mem: MemoryCache) -> None:
 
 @router.callback_query(F.data == "history")
 async def cb_history(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
-    await _render_history(callback.message, db, mem, as_edit=True)
+    await _render_history(callback.message, db, mem, chat_id=callback.from_user.id, as_edit=True)
     await callback.answer()
 
 
@@ -551,6 +559,7 @@ async def cb_history_view(
         filter_type=callback_data.filter_type,
         ref_id=callback_data.ref_id,
         page=callback_data.page,
+        chat_id=callback.from_user.id,
         as_edit=True,
     )
     await callback.answer()
@@ -583,12 +592,14 @@ async def _render_history(
     filter_type: str = "all",
     ref_id: str = "",
     page: int = 0,
+    chat_id: int | None = None,
     as_edit: bool = False,
 ) -> None:
-    user = await db.get_user(target.chat.id)
+    chat_id = chat_id or target.chat.id
+    user = await db.get_or_create_user(chat_id)
     h_start, h_end = utils.history_window()
-    series_ids, class_ids = await _subs_ids(db, target.chat.id)
-    subs = await db.get_subscriptions(target.chat.id)
+    series_ids, class_ids = await _subs_ids(db, chat_id)
+    subs = await db.get_subscriptions(chat_id)
 
     all_sessions = await utils.get_sessions(mem, db, h_start, h_end)
     all_broadcasts = await utils.get_broadcasts(mem, db, h_start)

@@ -71,7 +71,7 @@ async def cb_tz_chosen(
         await state.set_state(OnboardingStates.choosing_timezone_manual)
         await callback.answer()
         return
-    await db.update_user(callback.message.chat.id, timezone=tz)
+    await db.update_user(callback.from_user.id, timezone=tz)
     await _finish_onboarding(callback.message, state, db, mem)
     await callback.answer()
 

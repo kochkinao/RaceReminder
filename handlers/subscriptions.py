@@ -164,17 +164,47 @@ async def cb_sub_notify_toggle(
 
 # ── Series browser ────────────────────────────────────────────────────────────
 
-@router.callback_query(F.data.startswith("subs:series:"))
-async def cb_series_page(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
-    page       = int(callback.data.split(":")[-1])
+@router.callback_query(F.data == "subs:series")
+@router.callback_query(utils.SeriesBrowseCD.filter())
+async def cb_series_page(
+    callback: CallbackQuery,
+    db: Database,
+    mem: MemoryCache,
+    callback_data: utils.SeriesBrowseCD | None = None,
+) -> None:
+    group = "menu" if callback_data is None else utils.series_group_from_callback(callback_data.group)
+    page = 0 if callback_data is None else callback_data.page
+    subgroup = "" if callback_data is None else callback_data.subgroup
     all_series = await utils.get_all_series(mem, db)
-    subs       = await db.get_subscriptions(callback.from_user.id)
-    sub_ids    = {s["ref_id"] for s in subs if s["type"] == "series"}
+    subs = await db.get_subscriptions(callback.from_user.id)
+    sub_ids = {s["ref_id"] for s in subs if s["type"] == "series"}
+    if group == "menu":
+        await callback.message.edit_text(
+            "🏎️ <b>Серии</b>\nВыберите группу, чтобы не листать все серии подряд.",
+            parse_mode="HTML",
+            reply_markup=utils.series_group_menu(all_series, sub_ids),
+        )
+        await callback.answer()
+        return
+    group_items = utils.filter_series_by_group(all_series, group, sub_ids)
+    if not subgroup and utils.series_has_subgroups(group, group_items):
+        await callback.message.edit_text(
+            f"🏎️ <b>{utils.series_group_label(group)}</b>\nВыберите подгруппу.",
+            parse_mode="HTML",
+            reply_markup=utils.series_subgroup_menu(all_series, group, sub_ids),
+        )
+        await callback.answer()
+        return
+    group_label = utils.series_group_label(group)
+    group_total = len(utils.filter_series_by_group(all_series, group, sub_ids, subgroup=subgroup))
+    subgroup_suffix = f" · {subgroup}" if subgroup else ""
+    if subgroup:
+        subgroup_suffix = f" · {utils.series_subgroup_label(group, subgroup)}"
 
     await callback.message.edit_text(
-        "🏎️ <b>Серии</b>\n✅ — подписаны | ℹ️ — подробнее",
+        f"🏎️ <b>Серии</b>\n{group_label}{subgroup_suffix} · {group_total}\n✅ — подписаны | ℹ️ — подробнее",
         parse_mode="HTML",
-        reply_markup=utils.series_list(all_series, sub_ids, page),
+        reply_markup=utils.series_list(all_series, sub_ids, group=group, subgroup=subgroup, page=page),
     )
     await callback.answer()
 
@@ -203,18 +233,28 @@ async def cb_toggle_series(
 
     subs    = await db.get_subscriptions(callback.from_user.id)
     sub_ids = {x["ref_id"] for x in subs if x["type"] == "series"}
+    group = utils.series_group_from_callback(callback_data.group)
     await callback.message.edit_reply_markup(
-        reply_markup=utils.series_list(all_series, sub_ids, callback_data.page)
+        reply_markup=utils.series_list(
+            all_series,
+            sub_ids,
+            group=group,
+            subgroup=callback_data.subgroup,
+            page=callback_data.page,
+        )
     )
 
 
 # ── Series info card ──────────────────────────────────────────────────────────
 
-@router.callback_query(F.data.startswith("series_info:"))
+@router.callback_query(utils.SeriesInfoCD.filter())
 async def cb_series_info(
-    callback: CallbackQuery, db: Database, mem: MemoryCache
+    callback: CallbackQuery,
+    callback_data: utils.SeriesInfoCD,
+    db: Database,
+    mem: MemoryCache,
 ) -> None:
-    series_id  = callback.data.split(":", 1)[1]
+    series_id  = callback_data.ref_id
     all_series = await utils.get_all_series(mem, db)
     s = next((x for x in all_series if x["id"] == series_id), None)
     if not s:
@@ -238,9 +278,22 @@ async def cb_series_info(
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text=sub_text,
-            callback_data=utils.SubToggleCD(type="series", ref_id=series_id, page=0).pack(),
+            callback_data=utils.SubToggleCD(
+                type="series",
+                ref_id=series_id,
+                page=callback_data.page,
+                group=callback_data.group,
+                subgroup=callback_data.subgroup,
+            ).pack(),
         )],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="subs:series:0")],
+        [InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=utils.SeriesBrowseCD(
+                group=callback_data.group or utils.series_group_to_callback("all"),
+                page=callback_data.page,
+                subgroup=callback_data.subgroup,
+            ).pack(),
+        )],
     ])
     await callback.message.edit_text(
         text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True

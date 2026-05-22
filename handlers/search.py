@@ -13,6 +13,7 @@ from utils.cache import MemoryCache
 
 log    = logging.getLogger(__name__)
 router = Router()
+_QUERY_LINE_RE = re.compile(r"^Запрос:\s*(.+)$", re.MULTILINE)
 
 
 # ── Search normalization ──────────────────────────────────────────────────────
@@ -39,6 +40,86 @@ def _search_match(query: str, target: str) -> bool:
     nq, nt = _normalize(query), _normalize(target)
     cq, ct = _normalize_compact(query), _normalize_compact(target)
     return nq in nt or nt in nq or cq in ct or ct in cq
+
+
+def _resolve_query(query: str) -> str:
+    low = query.lower().strip()
+    return SEARCH_ALIASES.get(low, low).lower()
+
+
+def _extract_search_query(text: str | None) -> str | None:
+    if not text:
+        return None
+    match = _QUERY_LINE_RE.search(text)
+    if not match:
+        return None
+    query = match.group(1).strip()
+    return query or None
+
+
+def _search_results_text(query: str, series_count: int, class_count: int) -> str:
+    safe_query = escape(query)
+    return (
+        f"🔍 <b>Результаты поиска</b>\n\n"
+        f"Запрос: <b>{safe_query}</b>\n"
+        f"Найдено: серии — <b>{series_count}</b>, классы — <b>{class_count}</b>\n\n"
+        "Нажмите на пункт, чтобы подписаться или отписаться."
+    )
+
+
+def _search_results_keyboard(
+    series_matches: list[dict],
+    class_matches: list[dict],
+    subscribed_series_ids: set[str],
+    subscribed_class_ids: set[str],
+) -> InlineKeyboardMarkup:
+    btns: list[list[InlineKeyboardButton]] = []
+
+    for series in series_matches[:10]:
+        prefix = "💔" if series["id"] in subscribed_series_ids else "✅"
+        btns.append([InlineKeyboardButton(
+            text=f"{prefix} 🏎️ {series['name']}",
+            callback_data=utils.SearchToggleCD(type="series", ref_id=series["id"]).pack(),
+        )])
+
+    for vehicle_class in class_matches[:10]:
+        prefix = "💔" if vehicle_class["id"] in subscribed_class_ids else "✅"
+        btns.append([InlineKeyboardButton(
+            text=f"{prefix} 🏷️ {vehicle_class['name']}",
+            callback_data=utils.SearchToggleCD(type="vehicle_class", ref_id=vehicle_class["id"]).pack(),
+        )])
+
+    btns.append([InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=btns)
+
+
+async def _render_search_results(
+    query: str,
+    user_id: int,
+    db: Database,
+    mem: MemoryCache,
+) -> tuple[str, InlineKeyboardMarkup] | None:
+    resolved_query = _resolve_query(query)
+    all_series = await utils.get_all_series(mem, db)
+    all_classes = await utils.get_all_vehicle_classes(mem, db)
+
+    series_matches = [s for s in all_series if _search_match(resolved_query, s.get("name", ""))]
+    class_matches = [c for c in all_classes if _search_match(resolved_query, c.get("name", ""))]
+    if not series_matches and not class_matches:
+        return None
+
+    subs = await db.get_subscriptions(user_id)
+    subscribed_series_ids = {s["ref_id"] for s in subs if s["type"] == "series"}
+    subscribed_class_ids = {s["ref_id"] for s in subs if s["type"] == "vehicle_class"}
+
+    text = _search_results_text(query, len(series_matches), len(class_matches))
+    kb = _search_results_keyboard(
+        series_matches,
+        class_matches,
+        subscribed_series_ids,
+        subscribed_class_ids,
+    )
+    return text, kb
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -119,21 +200,9 @@ async def msg_search_query(message: Message, db: Database, mem: MemoryCache) -> 
     query = message.text.strip()
     if not query:
         return
-    safe_query = escape(query)
-
-    low = query.lower().strip()
-
-    # Resolve alias (f1 → Formula 1, wec → FIA World Endurance Championship, ...)
-    if low in SEARCH_ALIASES:
-        low = SEARCH_ALIASES[low].lower()
-
-    all_series = await utils.get_all_series(mem, db)
-    all_classes = await utils.get_all_vehicle_classes(mem, db)
-
-    series_matches = [s for s in all_series if _search_match(low, s.get("name", ""))]
-    class_matches  = [c for c in all_classes if _search_match(low, c.get("name", ""))]
-
-    if not series_matches and not class_matches:
+    rendered = await _render_search_results(query, message.from_user.id, db, mem)
+    if not rendered:
+        safe_query = escape(query)
         await message.answer(
             f"😕 Ничего не найдено по запросу <b>{safe_query}</b>\n\n"
             "Попробуйте другой запрос или воспользуйтесь базой знаний.",
@@ -142,38 +211,56 @@ async def msg_search_query(message: Message, db: Database, mem: MemoryCache) -> 
         )
         return
 
-    btns: list[list[InlineKeyboardButton]] = []
-
-    if series_matches:
-        btns.append([InlineKeyboardButton(text=f"🏎️ Серии · {len(series_matches)}", callback_data="noop")])
-        for s in series_matches[:10]:
-            is_subscribed = await db.is_subscribed(message.from_user.id, "series", s["id"])
-            prefix = "💔" if is_subscribed else "✅"
-            btns.append([InlineKeyboardButton(
-                text=f"{prefix} {s['name']}",
-                callback_data=utils.SubToggleCD(type="series", ref_id=s["id"], page=0).pack(),
-            )])
-
-    if class_matches:
-        btns.append([InlineKeyboardButton(text=f"🏷️ Классы · {len(class_matches)}", callback_data="noop")])
-        for c in class_matches[:10]:
-            is_subscribed = await db.is_subscribed(message.from_user.id, "vehicle_class", c["id"])
-            prefix = "💔" if is_subscribed else "✅"
-            btns.append([InlineKeyboardButton(
-                text=f"{prefix} {c['name']}",
-                callback_data=utils.SubToggleCD(type="vehicle_class", ref_id=c["id"], page=0).pack(),
-            )])
-
-    btns.append([InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")])
+    text, kb = rendered
 
     await message.answer(
-        f"🔍 <b>Результаты поиска</b>\n\n"
-        f"Запрос: <b>{safe_query}</b>\n"
-        f"Найдено: серии — <b>{len(series_matches)}</b>, классы — <b>{len(class_matches)}</b>\n\n"
-        "Нажмите на пункт, чтобы подписаться или отписаться.",
+        text,
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
+        reply_markup=kb,
     )
+
+
+@router.callback_query(utils.SearchToggleCD.filter())
+async def cb_search_toggle(
+    callback: CallbackQuery,
+    callback_data: utils.SearchToggleCD,
+    db: Database,
+    mem: MemoryCache,
+) -> None:
+    query = _extract_search_query(getattr(callback.message, "text", None))
+    if not query:
+        await callback.answer("Не удалось обновить результаты. Повторите поиск.", show_alert=True)
+        return
+
+    if callback_data.type == "series":
+        all_series = await utils.get_all_series(mem, db)
+        item = next((s for s in all_series if s["id"] == callback_data.ref_id), None)
+    else:
+        all_classes = await utils.get_all_vehicle_classes(mem, db)
+        item = next((c for c in all_classes if c["id"] == callback_data.ref_id), None)
+
+    if not item:
+        await callback.answer("Элемент не найден", show_alert=True)
+        return
+
+    if await db.is_subscribed(callback.from_user.id, callback_data.type, callback_data.ref_id):
+        await db.remove_subscription(callback.from_user.id, callback_data.type, callback_data.ref_id)
+        notice = f"❌ Отписались: {item['name']}"
+    else:
+        await db.add_subscription(
+            callback.from_user.id,
+            callback_data.type,
+            callback_data.ref_id,
+            item.get("name", ""),
+        )
+        notice = f"✅ Подписались: {item['name']}"
+
+    rendered = await _render_search_results(query, callback.from_user.id, db, mem)
+    if rendered:
+        _, kb = rendered
+        await callback.message.edit_reply_markup(reply_markup=kb)
+
+    await callback.answer(notice)
 
 
 # ── Knowledge base ────────────────────────────────────────────────────────────

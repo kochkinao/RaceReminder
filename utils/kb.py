@@ -2,11 +2,10 @@
 All keyboards live here. Handlers import from utils.kb — no keyboard
 construction logic scattered across handler files.
 """
-import json
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import POPULAR_TIMEZONES
+from config import DEFAULT_SERIES_NAMES, POPULAR_TIMEZONES
 
 
 # ── CallbackData factories (TrainingSchedule pattern) ─────────────────────────
@@ -15,6 +14,26 @@ class SubToggleCD(CallbackData, prefix="sub"):
     type:  str   # 'series' | 'vehicle_class'
     ref_id: str
     page:  int = 0
+    group: str = ""
+    subgroup: str = ""
+
+
+class SearchToggleCD(CallbackData, prefix="searchsub"):
+    type: str   # 'series' | 'vehicle_class'
+    ref_id: str
+
+
+class SeriesBrowseCD(CallbackData, prefix="seriesnav"):
+    group: str = "menu"
+    page: int = 0
+    subgroup: str = ""
+
+
+class SeriesInfoCD(CallbackData, prefix="seriesinfo"):
+    ref_id: str
+    group: str = ""
+    page: int = 0
+    subgroup: str = ""
 
 
 class KbShowCD(CallbackData, prefix="kb"):
@@ -88,7 +107,7 @@ def main_menu() -> InlineKeyboardMarkup:
 
 def subs_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏎️ Серии",           callback_data="subs:series:0")],
+        [InlineKeyboardButton(text="🏎️ Серии",           callback_data="subs:series")],
         [InlineKeyboardButton(text="🏷️ Классы",          callback_data="subs:classes")],
         [InlineKeyboardButton(text="📋 Мои подписки",    callback_data="subs:mine")],
         [InlineKeyboardButton(text="◀️ Меню",            callback_data="main_menu")],
@@ -135,6 +154,312 @@ def today_pager(page: int, total: int) -> InlineKeyboardMarkup:
 
 # ── Dynamic keyboards ─────────────────────────────────────────────────────────
 
+_SERIES_GROUPS: list[tuple[str, str]] = [
+    ("mine", "✅ Мои подписки"),
+    ("popular", "🔥 Популярные"),
+    ("formula", "🏎️ Formula"),
+    ("gt_sportscar", "🚗 GT и спорткары"),
+    ("endurance_proto", "⏱️ Endurance и prototype"),
+    ("nascar_oval", "🇺🇸 NASCAR и oval"),
+    ("touring_stock", "🚙 Touring и stock"),
+    ("rally_raid_rx", "🧭 Rally, raid и rallycross"),
+    ("moto_bike", "🏍️ Moto"),
+    ("dirt_drift_offroad", "💨 Drift, dirt и off-road"),
+    ("other", "📦 Остальное"),
+]
+
+_SERIES_GROUP_CODES: dict[str, str] = {
+    "menu": "mn",
+    "all": "al",
+    "mine": "mi",
+    "popular": "po",
+    "formula": "fo",
+    "gt_sportscar": "gs",
+    "endurance_proto": "ep",
+    "nascar_oval": "no",
+    "touring_stock": "ts",
+    "rally_raid_rx": "rr",
+    "moto_bike": "mb",
+    "dirt_drift_offroad": "dd",
+    "other": "ot",
+}
+
+_SERIES_GROUP_CODES_REV = {value: key for key, value in _SERIES_GROUP_CODES.items()}
+
+
+def _series_group_names() -> dict[str, set[str]]:
+    return {"popular": set(DEFAULT_SERIES_NAMES)}
+
+
+def series_group_to_callback(group: str) -> str:
+    return _SERIES_GROUP_CODES.get(group, group)
+
+
+def series_group_from_callback(value: str) -> str:
+    return _SERIES_GROUP_CODES_REV.get(value, value or "all")
+
+
+def _series_name(name: str) -> str:
+    return name.lower().strip()
+
+
+def _series_matches_group(name: str, group: str) -> bool:
+    n = _series_name(name)
+    if group == "formula":
+        return "drift" not in n and any(
+            token in n for token in ("formula", "f1 ", "f2", "f3", "f4", "f1 academy", "euroformula")
+        )
+    if group == "gt_sportscar":
+        return any(
+            token in n
+            for token in (
+                " gt",
+                "gt ",
+                "gt3",
+                "gt4",
+                "bmw",
+                "ferrari challenge",
+                "porsche",
+                "carrera cup",
+                "supercup",
+                "alpine elf cup",
+                "992",
+                "mclaren",
+                "lamborghini",
+                "aston martin",
+                "audi",
+                "mercedes",
+                "amg",
+            )
+        )
+    if group == "endurance_proto":
+        return any(
+            token in n
+            for token in (
+                "endurance",
+                "le mans",
+                "24h",
+                "24 hours",
+                "1000km",
+                "1006km",
+                "6 hour",
+                "12 horas",
+                "prototype",
+                "imsa",
+                "sportscar",
+                "sportscar championship",
+                "world endurance championship",
+            )
+        )
+    if group == "nascar_oval":
+        return any(token in n for token in ("nascar", "arca", "late model", "sprintcar", "sprint car", "modified", "menards"))
+    if group == "touring_stock":
+        return any(token in n for token in ("touring", "tcr", "dtm", "deutsche tourenwagen masters", "stock", "supercars", "truck", "clio cup", "bmw 318ti"))
+    if group == "rally_raid_rx":
+        return any(token in n for token in ("rally", "rallycross", "dakar", "raid", "rx"))
+    if group == "moto_bike":
+        return any(token in n for token in ("moto", "superbike", "motocross", "arenacross", "speedway", "road racing", "sgp", "supercross", "superenduro"))
+    if group == "dirt_drift_offroad":
+        return any(token in n for token in ("drift", "off road", "off-road", "snocross", "flat track", "dirt", "toboggan"))
+    return False
+
+
+def _series_primary_group(name: str) -> str:
+    for group in (
+        "formula",
+        "gt_sportscar",
+        "endurance_proto",
+        "nascar_oval",
+        "touring_stock",
+        "rally_raid_rx",
+        "moto_bike",
+        "dirt_drift_offroad",
+    ):
+        if _series_matches_group(name, group):
+            return group
+    return "other"
+
+_SERIES_SUBGROUPS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
+    "endurance_proto": [
+        ("we", "WEC", ("wec", "world endurance championship", "fia world endurance championship")),
+        ("im", "IMSA", ("imsa", "sportscar championship")),
+        ("el", "ELMS", ("european le mans series", "elms")),
+        ("as", "Asian Le Mans", ("asian le mans series", "asia le mans series", "aslms")),
+        ("24", "24H Series", ("24h series", "24h series european", "24h series middle east")),
+    ],
+    "gt_sportscar": [
+        ("gw", "GT World Challenge", ("gt world challenge",)),
+        ("po", "Porsche Cup", ("porsche", "carrera cup", "supercup", "992")),
+        ("fe", "Ferrari Challenge", ("ferrari challenge", "ferrari")),
+        ("bm", "BMW Cup", ("bmw", "m2 cup", "m4 cup")),
+    ],
+    "touring_stock": [
+        ("tc", "Touring Cars", ("touring car", "touring cars", "british touring car", "china touring car", "touring car masters", "touring championship")),
+        ("cr", "TCR", ("tcr",)),
+        ("dt", "DTM", ("dtm", "deutsche tourenwagen masters")),
+        ("tr", "Trucks", ("truck", "trucks", "copa truck", "truck racing", "european truck racing", "british truck racing", "nascar craftsman truck series", "stadium super trucks", "trucks mexico series")),
+        ("st", "Stock/Late Model", ("stock car", "stock light", "late model", "modified", "sprint car", "sprintcar", "cars tour", "pro late model", "smart modified tour", "whelen modified tour", "asa ", "hoosier racing tire scca super tour")),
+    ],
+    "rally_raid_rx": [
+        ("wr", "WRC", ("world rally championship", "wrc")),
+        ("er", "ERC", ("european rally championship",)),
+        ("rx", "Rallycross", ("rallycross", "rallyx", "rallycross world cup")),
+        ("rd", "Dakar / Raid", ("dakar", "raid")),
+        ("rt", "National Rally", ("rallyes", "rally show", "assoluto rally", "rally terra", "jnnerrallye", "monza rally show")),
+    ],
+}
+
+_SERIES_SUBGROUP_CODES_REV: dict[str, dict[str, str]] = {
+    group: {code: label for code, label, _tokens in items}
+    for group, items in _SERIES_SUBGROUPS.items()
+}
+
+
+def _series_order_key(series: dict, group: str) -> tuple[int, str]:
+    name = series.get("name", "")
+    if name in DEFAULT_SERIES_NAMES:
+        return (DEFAULT_SERIES_NAMES.index(name), name)
+    if group == "formula":
+        if name == "Formula 1":
+            return (0, name)
+        if name == "Formula 2":
+            return (1, name)
+        if name == "Formula 3":
+            return (2, name)
+    return (20, name)
+
+
+def _series_subgroup_label(group: str, subgroup: str) -> str:
+    for code, label, _tokens in _SERIES_SUBGROUPS.get(group, []):
+        if code == subgroup:
+            return label
+    return "Остальное"
+
+
+def series_subgroup_label(group: str, subgroup: str) -> str:
+    return _series_subgroup_label(group, subgroup)
+
+
+def _series_subgroup_match(name: str, group: str, subgroup: str) -> bool:
+    n = _series_name(name)
+    for code, _label, tokens in _SERIES_SUBGROUPS.get(group, []):
+        if code == subgroup:
+            return any(token in n for token in tokens)
+    return False
+
+
+def _series_has_subgroups(group: str, items: list[dict]) -> bool:
+    defs = _SERIES_SUBGROUPS.get(group, [])
+    if not defs:
+        return False
+    matches = 0
+    for code, _label, _tokens in defs:
+        if any(_series_subgroup_match(item.get("name", ""), group, code) for item in items):
+            matches += 1
+    return matches > 0
+
+
+def series_has_subgroups(group: str, items: list[dict]) -> bool:
+    return _series_has_subgroups(group, items)
+
+
+def series_group_label(group: str) -> str:
+    for key, label in _SERIES_GROUPS:
+        if key == group:
+            return label
+    return group or "Все серии"
+
+
+def filter_series_by_group(
+    all_series: list[dict],
+    group: str,
+    subscribed_ids: set[str] | None = None,
+    subgroup: str = "",
+) -> list[dict]:
+    sorted_series = sorted(all_series, key=lambda s: s.get("name", ""))
+    if not group or group == "all":
+        return sorted_series
+
+    if group == "mine":
+        subscribed_ids = subscribed_ids or set()
+        return [s for s in sorted_series if s.get("id") in subscribed_ids]
+
+    grouped_names = _series_group_names()
+    if group in grouped_names:
+        names = grouped_names[group]
+        result = [s for s in sorted_series if s.get("name", "") in names]
+        result = sorted(result, key=lambda s: _series_order_key(s, group))
+        if subgroup:
+            if subgroup == "ot":
+                result = [s for s in result if not any(
+                    _series_subgroup_match(s.get("name", ""), group, code)
+                    for code, _label, _tokens in _SERIES_SUBGROUPS.get(group, [])
+                )]
+            else:
+                result = [s for s in result if _series_subgroup_match(s.get("name", ""), group, subgroup)]
+        return result
+
+    result = [s for s in sorted_series if _series_primary_group(s.get("name", "")) == group]
+    result = sorted(result, key=lambda s: _series_order_key(s, group))
+    if subgroup:
+        if subgroup == "ot":
+            result = [s for s in result if not any(
+                _series_subgroup_match(s.get("name", ""), group, code)
+                for code, _label, _tokens in _SERIES_SUBGROUPS.get(group, [])
+            )]
+        else:
+            result = [s for s in result if _series_subgroup_match(s.get("name", ""), group, subgroup)]
+    return result
+
+
+def series_subgroup_menu(
+    all_series: list[dict],
+    group: str,
+    subscribed_ids: set[str],
+) -> InlineKeyboardMarkup:
+    items = filter_series_by_group(all_series, group, subscribed_ids)
+    rows: list[list[InlineKeyboardButton]] = []
+    for code, label, _tokens in _SERIES_SUBGROUPS.get(group, []):
+        count = len(filter_series_by_group(all_series, group, subscribed_ids, subgroup=code))
+        if count == 0:
+            continue
+        rows.append([InlineKeyboardButton(
+            text=f"{label} · {count}",
+            callback_data=SeriesBrowseCD(
+                group=series_group_to_callback(group),
+                page=0,
+                subgroup=code,
+            ).pack(),
+        )])
+    other_count = len(filter_series_by_group(all_series, group, subscribed_ids, subgroup="ot"))
+    if other_count:
+        rows.append([InlineKeyboardButton(
+            text=f"Остальное · {other_count}",
+            callback_data=SeriesBrowseCD(
+                group=series_group_to_callback(group),
+                page=0,
+                subgroup="ot",
+            ).pack(),
+        )])
+    rows.append([InlineKeyboardButton(
+        text="◀️ К группам",
+        callback_data=SeriesBrowseCD(group=series_group_to_callback("menu"), page=0).pack(),
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def series_group_menu(all_series: list[dict], subscribed_ids: set[str]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for key, label in _SERIES_GROUPS:
+        count = len(filter_series_by_group(all_series, key, subscribed_ids))
+        rows.append([InlineKeyboardButton(
+            text=f"{label} · {count}",
+            callback_data=SeriesBrowseCD(group=series_group_to_callback(key), page=0).pack(),
+        )])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="subs_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def timezone_picker(page: int = 0) -> InlineKeyboardMarkup:
     per = 8
     zones = POPULAR_TIMEZONES[page * per: (page + 1) * per]
@@ -164,31 +489,69 @@ def timezone_picker(page: int = 0) -> InlineKeyboardMarkup:
 def series_list(
     all_series:    list[dict],
     subscribed_ids: set[str],
+    group:         str = "all",
+    subgroup:      str = "",
     page:          int = 0,
     page_size:     int = 8,
 ) -> InlineKeyboardMarkup:
-    sorted_series = sorted(all_series, key=lambda s: s.get("name", ""))
-    chunk = sorted_series[page * page_size: (page + 1) * page_size]
+    filtered_series = filter_series_by_group(all_series, group, subscribed_ids, subgroup=subgroup)
+    chunk = filtered_series[page * page_size: (page + 1) * page_size]
     btns = []
     for s in chunk:
         check = "✅ " if s["id"] in subscribed_ids else ""
         btns.append([
             InlineKeyboardButton(
                 text=f"{check}{s.get('name','?')[:38]}",
-                callback_data=SubToggleCD(type="series", ref_id=s["id"], page=page).pack(),
+                callback_data=SubToggleCD(
+                    type="series",
+                    ref_id=s["id"],
+                    page=page,
+                    group=series_group_to_callback(group),
+                    subgroup=subgroup,
+                ).pack(),
             ),
-            InlineKeyboardButton(text="ℹ️", callback_data=f"series_info:{s['id']}"),
+            InlineKeyboardButton(
+                text="ℹ️",
+                callback_data=SeriesInfoCD(
+                    ref_id=s["id"],
+                    group=series_group_to_callback(group),
+                    page=page,
+                    subgroup=subgroup,
+                ).pack(),
+            ),
         ])
     nav: list[InlineKeyboardButton] = []
-    total = (len(sorted_series) - 1) // page_size + 1
+    total = (len(filtered_series) - 1) // page_size + 1 if filtered_series else 1
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"subs:series:{page-1}"))
+        nav.append(InlineKeyboardButton(
+            text="◀️",
+            callback_data=SeriesBrowseCD(
+                group=series_group_to_callback(group),
+                page=page - 1,
+                subgroup=subgroup,
+            ).pack(),
+        ))
     nav.append(InlineKeyboardButton(text=f"{page+1}/{total}", callback_data="noop"))
-    if (page + 1) * page_size < len(sorted_series):
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"subs:series:{page+1}"))
+    if (page + 1) * page_size < len(filtered_series):
+        nav.append(InlineKeyboardButton(
+            text="▶️",
+            callback_data=SeriesBrowseCD(
+                group=series_group_to_callback(group),
+                page=page + 1,
+                subgroup=subgroup,
+            ).pack(),
+        ))
     if nav:
         btns.append(nav)
-    btns.append([InlineKeyboardButton(text="◀️ Назад", callback_data="subs_menu")])
+    back_subgroup = "" if subgroup else "menu"
+    btns.append([InlineKeyboardButton(
+        text="◀️ К подгруппам" if subgroup else "◀️ К группам",
+        callback_data=SeriesBrowseCD(
+            group=series_group_to_callback(group if subgroup else "menu"),
+            page=0,
+            subgroup=back_subgroup,
+        ).pack(),
+    )])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
 

@@ -102,10 +102,12 @@ def test_digest_view_menu_uses_back_button_for_selected_subscription() -> None:
         total_pages=1,
         selected_sub={"type": "vehicle_class", "ref_id": "class-12345678"},
         user={"show_qualifying": 1, "show_practice": 0},
+        pick_page=2,
         allow_pick=True,
     )
 
     assert kb.inline_keyboard[-1][0].text == "◀️ Назад"
+    assert kb.inline_keyboard[-1][0].callback_data == utils.DigestViewCD(kind="week", action="pick", page=2).pack()
     assert kb.inline_keyboard[0][0].text == "✅ Квалификации"
     assert kb.inline_keyboard[0][1].text == "❌ Практики"
 
@@ -128,3 +130,31 @@ def test_digest_view_menu_uses_back_button_for_all_scope_without_menu() -> None:
         for row in kb.inline_keyboard
         for button in row
     )
+
+
+def test_digest_pick_menu_passes_origin_page_into_view_callbacks() -> None:
+    subs = [
+        {"type": "vehicle_class", "ref_id": f"class-{idx:08d}", "ref_name": f"Class {idx}"}
+        for idx in range(1, 10)
+    ]
+    kb = utils.digest_pick_menu(
+        "today",
+        subs,
+        page=1,
+    )
+
+    assert kb.inline_keyboard[0][0].callback_data == utils.DigestViewCD(
+        kind="today",
+        action="view",
+        scope="all",
+        page=0,
+        pick_page=1,
+    ).pack()
+    assert kb.inline_keyboard[1][0].callback_data == utils.DigestViewCD(
+        kind="today",
+        action="view",
+        scope="vehicle_class",
+        ref_id="class-00",
+        page=0,
+        pick_page=1,
+    ).pack()

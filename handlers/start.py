@@ -15,27 +15,10 @@ from states import OnboardingStates
 log = logging.getLogger(__name__)
 router = Router()
 
-_WELCOME = """\
-🏁 <b>Добро пожаловать в RaceDay Bot!</b>
-
-Я слежу за гоночным календарём и присылаю уведомления о гонках.
-
-<b>Что умею:</b>
-• 📅 Еженедельный дайджест по понедельникам
-• 🔔 Напоминания за 3 дня, сутки и час до старта
-• 📺 Ссылки на трансляции с фильтром по языку
-• 📚 База знаний о популярных сериях
-• 🔍 Поиск гонок и серий
-
-По умолчанию подписка на F1, WEC, IMSA, WRC и другие топ-серии.
-
-Для начала выберите <b>часовой пояс</b>:
-"""
-
 
 @router.callback_query(F.data == "check_sub")
 async def cb_check_sub(callback: CallbackQuery) -> None:
-    await callback.answer("Проверяем подписку...", show_alert=False)
+    await callback.answer(utils.tr(utils.UI_RU, "onboarding.checking_subscription"), show_alert=False)
 
 
 @router.message(CommandStart())
@@ -43,18 +26,39 @@ async def cmd_start(
     message: Message, state: FSMContext, db: Database, mem: MemoryCache, metrics
 ) -> None:
     if await db.user_exists(message.chat.id):
-        await message.answer("👋 С возвращением!", reply_markup=utils.main_menu())
+        user = await db.get_or_create_user(message.chat.id, message.from_user.username)
+        lang = utils.get_ui_lang(user)
+        await message.answer(utils.tr(lang, "onboarding.welcome_back"), reply_markup=utils.main_menu(lang))
         return
     await db.create_user(message.chat.id, message.from_user.username)
     metrics.new_users.inc()
-    await message.answer(_WELCOME, parse_mode="HTML", reply_markup=utils.timezone_picker())
+    await message.answer(
+        utils.tr(utils.UI_RU, "onboarding.choose_language"),
+        parse_mode="HTML",
+        reply_markup=utils.ui_language_picker(),
+    )
+    await state.set_state(OnboardingStates.choosing_ui_language)
+
+
+@router.callback_query(F.data.startswith("ui_lang:"), OnboardingStates.choosing_ui_language)
+async def cb_ui_lang_chosen(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    lang = utils.normalize_ui_lang(callback.data.split(":", 1)[1])
+    await db.update_user(callback.from_user.id, ui_lang=lang)
+    await callback.message.edit_text(
+        utils.tr(lang, "onboarding.welcome"),
+        parse_mode="HTML",
+        reply_markup=utils.timezone_picker(lang=lang),
+    )
     await state.set_state(OnboardingStates.choosing_timezone)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("tz_page:"))
-async def cb_tz_page(callback: CallbackQuery) -> None:
+async def cb_tz_page(callback: CallbackQuery, db: Database) -> None:
     page = int(callback.data.split(":")[1])
-    await callback.message.edit_reply_markup(reply_markup=utils.timezone_picker(page))
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    await callback.message.edit_reply_markup(reply_markup=utils.timezone_picker(page, lang=lang))
     await callback.answer()
 
 
@@ -62,10 +66,12 @@ async def cb_tz_page(callback: CallbackQuery) -> None:
 async def cb_tz_chosen(
     callback: CallbackQuery, state: FSMContext, db: Database, mem: MemoryCache
 ) -> None:
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
     tz = callback.data.split(":", 1)[1]
     if tz == "manual":
         await callback.message.answer(
-            "Введите ваш часовой пояс, например: <code>Europe/Berlin</code>",
+            utils.tr(lang, "onboarding.enter_timezone"),
             parse_mode="HTML",
         )
         await state.set_state(OnboardingStates.choosing_timezone_manual)
@@ -81,14 +87,16 @@ async def msg_tz_manual(
     message: Message, state: FSMContext, db: Database, mem: MemoryCache
 ) -> None:
     import pytz
+    user = await db.get_or_create_user(message.chat.id, message.from_user.username)
+    lang = utils.get_ui_lang(user)
     tz_input = message.text.strip()
     try:
         pytz.timezone(tz_input)
     except Exception:
         await message.answer(
-            f"❌ Неизвестный часовой пояс <code>{escape(tz_input)}</code>. Попробуйте снова.",
+            utils.tr(lang, "error.unknown_timezone", value=escape(tz_input)),
             parse_mode="HTML",
-            reply_markup=utils.timezone_picker(),
+            reply_markup=utils.timezone_picker(lang=lang),
         )
         return
     await db.update_user(message.chat.id, timezone=tz_input)
@@ -100,7 +108,9 @@ async def _finish_onboarding(
 ) -> None:
     await state.clear()
     chat_id = message.chat.id
-    await message.answer("⏳ Подписываю на популярные серии...")
+    user = await db.get_or_create_user(chat_id, message.from_user.username)
+    lang = utils.get_ui_lang(user)
+    await message.answer(utils.tr(lang, "onboarding.subscribing"))
 
     subscribed: list[str] = []
     try:
@@ -116,30 +126,33 @@ async def _finish_onboarding(
                     )
         subs_text = "\n".join(f"  ✅ {n}" for n in subscribed[:10])
         if len(subscribed) > 10:
-            subs_text += f"\n  ... и ещё {len(subscribed) - 10}"
+            subs_text += f"\n  {'... и ещё' if lang == 'ru' else '... and'} {len(subscribed) - 10}"
     except Exception as exc:
         log.error("Default subscriptions failed: %s", exc)
-        subs_text = "  (не удалось загрузить список серий)"
+        subs_text = utils.tr(lang, "onboarding.subscriptions_failed")
 
     await message.answer(
-        f"✅ <b>Настройка завершена!</b>\n\nВы подписаны на:\n{subs_text}\n\n"
-        f"Используйте /menu для навигации.",
+        utils.tr(lang, "onboarding.setup_done", subs_text=subs_text),
         parse_mode="HTML",
-        reply_markup=utils.main_menu(),
+        reply_markup=utils.main_menu(lang),
     )
 
 
 @router.message(Command("menu"))
-async def cmd_menu(message: Message) -> None:
+async def cmd_menu(message: Message, db: Database) -> None:
+    user = await db.get_or_create_user(message.chat.id, message.from_user.username)
+    lang = utils.get_ui_lang(user)
     await message.answer(
-        "🏁 <b>Главное меню</b>", parse_mode="HTML", reply_markup=utils.main_menu()
+        utils.tr(lang, "app.main_menu"), parse_mode="HTML", reply_markup=utils.main_menu(lang)
     )
 
 
 @router.callback_query(F.data == "main_menu")
-async def cb_main_menu(callback: CallbackQuery) -> None:
+async def cb_main_menu(callback: CallbackQuery, db: Database) -> None:
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
     await callback.message.edit_text(
-        "🏁 <b>Главное меню</b>", parse_mode="HTML", reply_markup=utils.main_menu()
+        utils.tr(lang, "app.main_menu"), parse_mode="HTML", reply_markup=utils.main_menu(lang)
     )
     await callback.answer()
 

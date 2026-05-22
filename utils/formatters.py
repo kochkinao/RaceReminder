@@ -4,6 +4,7 @@ from typing import Any
 import pytz
 
 from config import BROADCAST_TYPES
+from utils.i18n import DEFAULT_UI_LANG, tr
 
 type SessionDict   = dict[str, Any]
 type BroadcastDict = dict[str, Any]
@@ -33,6 +34,25 @@ _CATEGORY_LABELS: dict[str, str] = {
     "practice": "🛠 Практика",
 }
 
+_STATUS_LABELS_EN: dict[int, str] = {
+    0: "",
+    1: "🟢 Live",
+    2: "✅ Finished",
+    3: "❌ Cancelled",
+    4: "⏸ Postponed",
+}
+
+_CATEGORY_LABELS_EN: dict[str, str] = {
+    "race": "🏁 Race",
+    "qualifying": "🎯 Qualifying",
+    "practice": "🛠 Practice",
+}
+
+_MONTHS_RU = ("янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек")
+_MONTHS_EN = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_DAYS_RU = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+_DAYS_EN = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
 QUALIFYING_KEYWORDS = frozenset({
     "quali", "qualifying", "квали", "pole",
     "hyperpole", "shootout",
@@ -50,17 +70,27 @@ PRACTICE_KEYWORDS = frozenset({
 def to_local(ts: int, tz_name: str) -> datetime:
     return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(pytz.timezone(tz_name))
 
-def fmt_datetime(ts: int, tz_name: str) -> str:
-    return to_local(ts, tz_name).strftime("%d %b %Y, %H:%M")
+def _month_name(dt: datetime, ui_lang: str) -> str:
+    return (_MONTHS_EN if ui_lang == "en" else _MONTHS_RU)[dt.month - 1]
 
-def fmt_time(ts: int, tz_name: str) -> str:
+
+def _day_name(dt: datetime, ui_lang: str) -> str:
+    return (_DAYS_EN if ui_lang == "en" else _DAYS_RU)[dt.weekday()]
+
+
+def fmt_datetime(ts: int, tz_name: str, ui_lang: str = DEFAULT_UI_LANG) -> str:
+    dt = to_local(ts, tz_name)
+    return f"{dt.day:02d} {_month_name(dt, ui_lang)} {dt.year}, {dt:%H:%M}"
+
+
+def fmt_time(ts: int, tz_name: str, ui_lang: str = DEFAULT_UI_LANG) -> str:
     return to_local(ts, tz_name).strftime("%H:%M")
 
-def fmt_duration(minutes: int) -> str:
+def fmt_duration(minutes: int, ui_lang: str = DEFAULT_UI_LANG) -> str:
     match minutes // 60, minutes % 60:
-        case 0, m: return f"{m} мин"
-        case h, 0: return f"{h}ч"
-        case h, m: return f"{h}ч {m}мин"
+        case 0, m: return f"{m} {'min' if ui_lang == 'en' else 'мин'}"
+        case h, 0: return f"{h}{'h' if ui_lang == 'en' else 'ч'}"
+        case h, m: return f"{h}{'h' if ui_lang == 'en' else 'ч'} {m}{'min' if ui_lang == 'en' else 'мин'}"
 
 def is_qualifying(name: str) -> bool:
     low = name.lower()
@@ -78,12 +108,15 @@ def session_category(name: str) -> str:
     return "race"
 
 
-def _category_label(name: str) -> str:
-    return _CATEGORY_LABELS.get(session_category(name), "🏁 Сессия")
+def _category_label(name: str, ui_lang: str = DEFAULT_UI_LANG) -> str:
+    labels = _CATEGORY_LABELS_EN if ui_lang == "en" else _CATEGORY_LABELS
+    fallback = "🏁 Session" if ui_lang == "en" else "🏁 Сессия"
+    return labels.get(session_category(name), fallback)
 
 
-def _local_day_label(ts: int, tz_name: str) -> str:
-    return to_local(ts, tz_name).strftime("%a, %d %b").capitalize()
+def _local_day_label(ts: int, tz_name: str, ui_lang: str = DEFAULT_UI_LANG) -> str:
+    dt = to_local(ts, tz_name)
+    return f"{_day_name(dt, ui_lang)}, {dt.day:02d} {_month_name(dt, ui_lang)}"
 
 
 # ── Visual helpers ────────────────────────────────────────────────────────────
@@ -106,13 +139,14 @@ def session_card(
     user_langs:   list[str],
     show_no_bc:   bool = True,
     compact:      bool = False,
+    ui_lang:      str = DEFAULT_UI_LANG,
 ) -> str | None:
     bc = [b for b in broadcasts if any(l in b.get("langIds", []) for l in user_langs)]
 
     if not show_no_bc and not bc and not live_timings:
         return None
 
-    name:     str  = session.get("name", "Гонка")
+    name:     str  = session.get("name", "Race" if ui_lang == "en" else "Гонка")
     start_ts: int  = session.get("start", 0)
     duration: int  = session.get("durationMinutes", 0)
     location: dict = session.get("location", {})
@@ -120,36 +154,38 @@ def session_card(
     status:   int  = session.get("status", 0)
     emoji          = class_emojis(session)
     series_names   = " · ".join(s.get("name", "") for s in session.get("series", []))
-    category_label = _category_label(name)
+    category_label = _category_label(name, ui_lang)
 
     if compact:
         t      = fmt_time(start_ts, user_tz) if start_ts else "?"
         bc_str = ""
         if bc:
             b0    = bc[0]
-            desc  = b0.get("description") or "Трансляция"
+            desc  = b0.get("description") or ("Broadcast" if ui_lang == "en" else "Трансляция")
             bc_str = f" · 📺 {desc}" + (" [$]" if b0.get("isPaid") else "")
         elif live_timings:
             bc_str = " · 📊 Live Timing"
-        status_str = f" {_STATUS_LABELS[status]}" if status else ""
+        labels = _STATUS_LABELS_EN if ui_lang == "en" else _STATUS_LABELS
+        status_str = f" {labels[status]}" if status else ""
         series_str = f" · {series_names}" if series_names else ""
         return f"{t} · {category_label}\n{emoji} <b>{name}</b>{series_str}{status_str}{bc_str}"
 
     lines = [f"{emoji} <b>{name}</b>"]
 
     # Status (only show non-default)
-    if status_label := _STATUS_LABELS.get(status, ""):
+    status_labels = _STATUS_LABELS_EN if ui_lang == "en" else _STATUS_LABELS
+    if status_label := status_labels.get(status, ""):
         lines.append(status_label)
     lines.append(category_label)
 
     if series_names:
         lines.append(f"📋 {series_names}")
     if start_ts and duration:
-        lines.append(f"🕐 {fmt_datetime(start_ts, user_tz)} · {fmt_duration(duration)}")
+        lines.append(f"🕐 {fmt_datetime(start_ts, user_tz, ui_lang)} · {fmt_duration(duration, ui_lang)}")
     elif start_ts:
-        lines.append(f"🕐 {fmt_datetime(start_ts, user_tz)}")
+        lines.append(f"🕐 {fmt_datetime(start_ts, user_tz, ui_lang)}")
     elif duration:
-        lines.append(f"⏱ {fmt_duration(duration)}")
+        lines.append(f"⏱ {fmt_duration(duration, ui_lang)}")
 
     # Location — use alternateName if available, fallback to name
     if location:
@@ -163,7 +199,7 @@ def session_card(
         if loc_str := ", ".join(loc_parts):
             year_s = ""
             if year_opened:
-                year_s = f" (с {year_opened})"
+                year_s = f" ({'since' if ui_lang == 'en' else 'с'} {year_opened})"
                 if year_closed:
                     year_s = f" ({year_opened}–{year_closed})"
             lines.append(f"📍 {loc_str}{year_s}")
@@ -171,6 +207,8 @@ def session_card(
         if (lat := location.get("lat")) and (lon := location.get("lon")):
             lines.append(
                 f"🗺 <a href='https://maps.google.com/?q={lat},{lon}'>Открыть на карте</a>"
+                if ui_lang == "ru"
+                else f"🗺 <a href='https://maps.google.com/?q={lat},{lon}'>Open on map</a>"
             )
 
     if notes:
@@ -179,9 +217,9 @@ def session_card(
     # Broadcasts
     if bc:
         lines.append("")
-        lines.append("📺 <b>Трансляции</b>")
+        lines.append("📺 <b>Broadcasts</b>" if ui_lang == "en" else "📺 <b>Трансляции</b>")
         for b in bc[:5]:
-            desc   = b.get("description") or "Трансляция"
+            desc   = b.get("description") or ("Broadcast" if ui_lang == "en" else "Трансляция")
             url    = b.get("url", "")
             btype  = BROADCAST_TYPES.get(b.get("type"), "")
             paid   = " <b>[$]</b>" if b.get("isPaid") else ""
@@ -191,7 +229,11 @@ def session_card(
             lines.append(f"• {btype} {body}{paid}{geo}{langs}".strip())
     elif show_no_bc:
         lines.append("")
-        lines.append("📺 Для выбранных языков трансляция пока не найдена")
+        lines.append(
+            "📺 No broadcast found yet for the selected languages"
+            if ui_lang == "en"
+            else "📺 Для выбранных языков трансляция пока не найдена"
+        )
 
     if live_timings:
         lines.append("")
@@ -214,6 +256,7 @@ def build_digest(
     user_langs:     list[str],
     show_no_bc:     bool = True,
     header:         str  = "",
+    ui_lang:        str = DEFAULT_UI_LANG,
 ) -> list[str]:
     messages: list[str] = []
     current = header + "\n" if header else ""
@@ -228,6 +271,7 @@ def build_digest(
             user_tz=user_tz,
             user_langs=user_langs,
             show_no_bc=show_no_bc,
+            ui_lang=ui_lang,
         )
         if card is None:
             continue
@@ -248,7 +292,8 @@ def build_digest(
         messages.append(current)
     if not messages:
         messages.append(
-            (header + "\n\n" if header else "") + "😴 Нет гонок по вашим подпискам."
+            (header + "\n\n" if header else "") +
+            ("😴 No sessions found for your subscriptions." if ui_lang == "en" else "😴 Нет гонок по вашим подпискам.")
         )
     return messages
 
@@ -262,13 +307,14 @@ def notification_text(
     user_tz:      str,
     user_langs:   list[str],
     notif_type:   str,
+    ui_lang:      str = DEFAULT_UI_LANG,
 ) -> str:
     labels = {
-        "3days": "🔔 Через 3 дня",
-        "1day":  "🔔 Завтра",
-        "1hour": "🚨 Через час",
-        "start": "🏁 Сейчас начинается",
+        "3days": "🔔 In 3 Days" if ui_lang == "en" else "🔔 Через 3 дня",
+        "1day": "🔔 Tomorrow" if ui_lang == "en" else "🔔 Завтра",
+        "1hour": "🚨 In 1 Hour" if ui_lang == "en" else "🚨 Через час",
+        "start": "🏁 Starting Now" if ui_lang == "en" else "🏁 Сейчас начинается",
     }
-    label = labels.get(notif_type, "🔔 Напоминание")
-    card  = session_card(session, broadcasts, live_timings, user_tz, user_langs) or ""
+    label = labels.get(notif_type, "🔔 Reminder" if ui_lang == "en" else "🔔 Напоминание")
+    card  = session_card(session, broadcasts, live_timings, user_tz, user_langs, ui_lang=ui_lang) or ""
     return f"{label}\n\n{card}"

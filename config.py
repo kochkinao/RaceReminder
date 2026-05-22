@@ -104,7 +104,7 @@ BROADCAST_TYPES: dict[int, str] = {
 
 # ── Allowed DB fields for update_user (whitelist against injection) ───────────
 ALLOWED_USER_FIELDS: frozenset[str] = frozenset({
-    "username", "timezone", "preferred_langs",
+    "username", "timezone", "preferred_langs", "ui_lang",
     "digest_enabled", "digest_time",
     "quiet_enabled", "quiet_start", "quiet_end",
     "show_no_broadcast", "show_qualifying", "show_practice",

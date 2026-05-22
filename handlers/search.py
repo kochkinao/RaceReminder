@@ -4,16 +4,18 @@ import unicodedata
 from html import escape
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import utils
 from config import SEARCH_ALIASES
 from database import Database
+from states import SearchStates
 from utils.cache import MemoryCache
 
 log    = logging.getLogger(__name__)
 router = Router()
-_QUERY_LINE_RE = re.compile(r"^Запрос:\s*(.+)$", re.MULTILINE)
+_QUERY_LINE_RE = re.compile(r"^(?:Запрос|Query):\s*(.+)$", re.MULTILINE)
 
 
 # ── Search normalization ──────────────────────────────────────────────────────
@@ -57,13 +59,14 @@ def _extract_search_query(text: str | None) -> str | None:
     return query or None
 
 
-def _search_results_text(query: str, series_count: int, class_count: int) -> str:
+def _search_results_text(query: str, series_count: int, class_count: int, lang: str) -> str:
     safe_query = escape(query)
-    return (
-        f"🔍 <b>Результаты поиска</b>\n\n"
-        f"Запрос: <b>{safe_query}</b>\n"
-        f"Найдено: серии — <b>{series_count}</b>, классы — <b>{class_count}</b>\n\n"
-        "Нажмите на пункт, чтобы подписаться или отписаться."
+    return utils.tr(
+        lang,
+        "search.results",
+        query=safe_query,
+        series_count=series_count,
+        class_count=class_count,
     )
 
 
@@ -72,6 +75,7 @@ def _search_results_keyboard(
     class_matches: list[dict],
     subscribed_series_ids: set[str],
     subscribed_class_ids: set[str],
+    lang: str = utils.UI_RU,
 ) -> InlineKeyboardMarkup:
     btns: list[list[InlineKeyboardButton]] = []
 
@@ -89,7 +93,7 @@ def _search_results_keyboard(
             callback_data=utils.SearchToggleCD(type="vehicle_class", ref_id=vehicle_class["id"]).pack(),
         )])
 
-    btns.append([InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")])
+    btns.append([InlineKeyboardButton(text=utils.tr(lang, "menu.back_to_menu"), callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
 
@@ -100,6 +104,8 @@ async def _render_search_results(
     mem: MemoryCache,
 ) -> tuple[str, InlineKeyboardMarkup] | None:
     resolved_query = _resolve_query(query)
+    user = await db.get_or_create_user(user_id)
+    lang = utils.get_ui_lang(user)
     all_series = await utils.get_all_series(mem, db)
     all_classes = await utils.get_all_vehicle_classes(mem, db)
 
@@ -112,12 +118,13 @@ async def _render_search_results(
     subscribed_series_ids = {s["ref_id"] for s in subs if s["type"] == "series"}
     subscribed_class_ids = {s["ref_id"] for s in subs if s["type"] == "vehicle_class"}
 
-    text = _search_results_text(query, len(series_matches), len(class_matches))
+    text = _search_results_text(query, len(series_matches), len(class_matches), lang)
     kb = _search_results_keyboard(
         series_matches,
         class_matches,
         subscribed_series_ids,
         subscribed_class_ids,
+        lang,
     )
     return text, kb
 
@@ -134,11 +141,13 @@ async def _build_kb_card(
     db: Database,
     mem: MemoryCache,
 ) -> tuple[str, InlineKeyboardMarkup]:
+    user = await db.get_or_create_user(user_id)
+    lang = utils.get_ui_lang(user)
     info = utils.SERIES_KB.get(name)
     if not info:
-        raise ValueError("Серия не найдена")
+        raise ValueError(utils.tr(lang, "generic.series_not_found"))
 
-    text    = utils.format_card(name, info)
+    text    = utils.format_card(name, info, lang=lang)
     similar = info.get("similar", [])
     btns: list[list[InlineKeyboardButton]] = []
 
@@ -156,58 +165,57 @@ async def _build_kb_card(
     )
     if matched:
         is_sub   = await db.is_subscribed(user_id, "series", matched["id"])
-        sub_text = "❌ Отписаться" if is_sub else "✅ Подписаться"
+        sub_text = utils.tr(lang, "menu.unsubscribe") if is_sub else utils.tr(lang, "menu.subscribe")
         btns.append([InlineKeyboardButton(
             text=sub_text,
             callback_data=_kb_sub_callback(matched["id"]),
         )])
 
-    btns.append([InlineKeyboardButton(text="◀️ База знаний", callback_data="kb_menu")])
+    btns.append([InlineKeyboardButton(text=utils.tr(lang, "menu.back_to_knowledge_base"), callback_data="kb_menu")])
     return text, InlineKeyboardMarkup(inline_keyboard=btns)
 
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
 @router.message(F.text.startswith("🔍"))
-async def msg_search_btn(message: Message, db: Database, mem: MemoryCache) -> None:
-    await _show_search_prompt(message)
+async def msg_search_btn(message: Message, state: FSMContext, db: Database) -> None:
+    await _show_search_prompt(message, state, db)
 
 
-async def _show_search_prompt(target: Message) -> None:
-    await target.answer(
-        "🔍 <b>Поиск серий и классов</b>\n\n"
-        "Введите название серии или класса автомобилей.\n"
-        "Например: <i>Formula 1</i>, <i>GT3</i>, <i>WEC</i>",
-        parse_mode="HTML",
-        reply_markup=utils.back_to_menu(),
-    )
+async def _show_search_prompt(target: Message | CallbackQuery, state: FSMContext, db: Database) -> None:
+    await state.set_state(SearchStates.waiting_query)
+    user_id = target.from_user.id if isinstance(target, CallbackQuery) else target.chat.id
+    user = await db.get_or_create_user(user_id, getattr(getattr(target, "from_user", None), "username", None))
+    lang = utils.get_ui_lang(user)
+    text = utils.tr(lang, "search.prompt")
+    markup = utils.back_to_menu(lang)
+    if isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    else:
+        await target.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
 @router.callback_query(F.data == "search_prompt")
-async def cb_search_menu(callback: CallbackQuery) -> None:
-    await callback.message.edit_text(
-        "🔍 <b>Поиск серий и классов</b>\n\n"
-        "Введите название серии или класса автомобилей.\n"
-        "Например: <i>Formula 1</i>, <i>GT3</i>, <i>WEC</i>",
-        parse_mode="HTML",
-        reply_markup=utils.back_to_menu(),
-    )
+async def cb_search_menu(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    await _show_search_prompt(callback, state, db)
     await callback.answer()
 
 
-@router.message(F.text & ~F.text.startswith("/"))
-async def msg_search_query(message: Message, db: Database, mem: MemoryCache) -> None:
+@router.message(SearchStates.waiting_query, F.text & ~F.text.startswith("/"))
+async def msg_search_query(message: Message, state: FSMContext, db: Database, mem: MemoryCache) -> None:
     query = message.text.strip()
     if not query:
         return
+    await state.clear()
+    user = await db.get_or_create_user(message.chat.id, message.from_user.username)
+    lang = utils.get_ui_lang(user)
     rendered = await _render_search_results(query, message.from_user.id, db, mem)
     if not rendered:
         safe_query = escape(query)
         await message.answer(
-            f"😕 Ничего не найдено по запросу <b>{safe_query}</b>\n\n"
-            "Попробуйте другой запрос или воспользуйтесь базой знаний.",
+            utils.tr(lang, "search.nothing_found", query=safe_query),
             parse_mode="HTML",
-            reply_markup=utils.back_to_menu(),
+            reply_markup=utils.back_to_menu(lang),
         )
         return
 
@@ -229,8 +237,12 @@ async def cb_search_toggle(
 ) -> None:
     query = _extract_search_query(getattr(callback.message, "text", None))
     if not query:
-        await callback.answer("Не удалось обновить результаты. Повторите поиск.", show_alert=True)
+        user = await db.get_or_create_user(callback.from_user.id)
+        await callback.answer(utils.tr(utils.get_ui_lang(user), "search.refresh_failed"), show_alert=True)
         return
+
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
 
     if callback_data.type == "series":
         all_series = await utils.get_all_series(mem, db)
@@ -240,7 +252,7 @@ async def cb_search_toggle(
         item = next((c for c in all_classes if c["id"] == callback_data.ref_id), None)
 
     if not item:
-        await callback.answer("Элемент не найден", show_alert=True)
+        await callback.answer(utils.tr(lang, "search.item_not_found"), show_alert=True)
         return
 
     if await db.is_subscribed(callback.from_user.id, callback_data.type, callback_data.ref_id):
@@ -266,10 +278,12 @@ async def cb_search_toggle(
 # ── Knowledge base ────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "kb_menu")
-async def cb_kb_menu(callback: CallbackQuery) -> None:
-    kb = utils.kb_menu(utils.SERIES_KB)
+async def cb_kb_menu(callback: CallbackQuery, db: Database) -> None:
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    kb = utils.kb_menu(utils.SERIES_KB, lang)
     await callback.message.edit_text(
-        "📚 <b>База знаний</b>\n\nВыберите серию, чтобы узнать о ней подробнее:",
+        utils.tr(lang, "search.kb_title"),
         parse_mode="HTML",
         reply_markup=kb,
     )
@@ -284,8 +298,10 @@ async def cb_kb_show(
     mem: MemoryCache,
 ) -> None:
     name = callback_data.name
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
     if name not in utils.SERIES_KB:
-        await callback.answer("Серия не найдена", show_alert=True)
+        await callback.answer(utils.tr(lang, "generic.series_not_found"), show_alert=True)
         return
 
     text, kb = await _build_kb_card(callback.from_user.id, name, db, mem)
@@ -304,10 +320,12 @@ async def cb_kb_sub_toggle(
     mem: MemoryCache,
 ) -> None:
     series_id  = callback.data.split(":", 1)[1]
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
     all_series = await utils.get_all_series(mem, db)
     series     = next((s for s in all_series if s["id"] == series_id), None)
     if not series:
-        await callback.answer("Серия не найдена")
+        await callback.answer(utils.tr(lang, "generic.series_not_found"))
         return
 
     if await db.is_subscribed(callback.from_user.id, "series", series_id):

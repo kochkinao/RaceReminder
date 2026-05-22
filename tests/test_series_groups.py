@@ -48,24 +48,24 @@ def test_filter_series_by_thematic_group() -> None:
 def test_filter_series_by_mine_and_popular() -> None:
     all_series = _make_series(
         "Formula 1",
-        "INDYCAR SERIES",
+        "MotoGP",
         "World Endurance Championship",
         "IMSA WeatherTech SportsCar Championship",
+        "INDYCAR SERIES",
         "GT World Challenge Europe Sprint Cup",
         "Random Championship",
     )
     subscribed_ids = {"id-2", "id-5"}
 
     assert [s["name"] for s in utils.filter_series_by_group(all_series, "mine", subscribed_ids)] == [
-        "GT World Challenge Europe Sprint Cup",
         "INDYCAR SERIES",
+        "MotoGP",
     ]
     assert [s["name"] for s in utils.filter_series_by_group(all_series, "popular", subscribed_ids)] == [
         "Formula 1",
+        "MotoGP",
         "World Endurance Championship",
         "IMSA WeatherTech SportsCar Championship",
-        "INDYCAR SERIES",
-        "GT World Challenge Europe Sprint Cup",
     ]
 
 
@@ -92,9 +92,20 @@ def test_series_group_menu_shows_priority_groups() -> None:
     kb = utils.series_group_menu(all_series, subscribed_ids)
 
     assert kb.inline_keyboard[0][0].text == "✅ Мои подписки · 1"
-    assert kb.inline_keyboard[1][0].text == "🔥 Популярные · 2"
+    assert kb.inline_keyboard[1][0].text == "🔥 Популярные · 1"
     assert kb.inline_keyboard[2][0].text == "🏎️ Formula · 1"
     assert kb.inline_keyboard[-1][0].callback_data == "subs_menu"
+
+
+def test_series_group_menu_supports_english_labels() -> None:
+    all_series = _make_series("Formula 1", "GT World Challenge Europe", "Random Championship")
+
+    kb = utils.series_group_menu(all_series, set(), lang="en")
+
+    assert kb.inline_keyboard[0][0].text == "✅ My Subscriptions · 0"
+    assert kb.inline_keyboard[1][0].text == "🔥 Popular · 1"
+    assert kb.inline_keyboard[3][0].text == "🚗 GT and Sports Cars · 1"
+    assert kb.inline_keyboard[-1][0].text == "◀️ Back"
 
 
 def test_series_callbacks_use_short_group_codes() -> None:

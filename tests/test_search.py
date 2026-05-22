@@ -36,3 +36,11 @@ def test_search_results_keyboard_uses_dedicated_callbacks() -> None:
         for row in kb.inline_keyboard[:-1]
         for button in row
     )
+
+
+def test_format_card_supports_english_localization() -> None:
+    text = utils.format_card("Formula 1", lang="en")
+
+    assert "The top tier of global motorsport" in text
+    assert "Key Events" in text
+    assert "Official Website" in text

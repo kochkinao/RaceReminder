@@ -2,6 +2,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class OnboardingStates(StatesGroup):
+    choosing_ui_language = State()
     choosing_timezone = State()
     choosing_timezone_manual = State()
 

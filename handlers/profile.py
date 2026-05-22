@@ -24,17 +24,24 @@ _TOGGLE_FIELDS = {
 async def _show_profile(target: Message | CallbackQuery, db: Database) -> None:
     chat_id = target.from_user.id
     user = await db.get_or_create_user(chat_id)
+    lang = utils.get_ui_lang(user)
 
     langs = json.loads(user.get("preferred_langs", '["English"]'))
     text = (
-        f"⚙️ <b>Личный кабинет</b>\n\n"
-        f"🌍 Часовой пояс: <code>{user['timezone']}</code>\n"
-        f"🌐 Языки: <b>{', '.join(langs)}</b>\n"
-        f"📅 Дайджест: {'вкл' if user['digest_enabled'] else 'выкл'} в {user['digest_time']}\n"
-        f"🔕 Тихие часы: {'вкл' if user['quiet_enabled'] else 'выкл'} "
-        f"({user['quiet_start']}:00–{user['quiet_end']}:00)"
+        f"{utils.tr(lang, 'profile.title')}\n\n"
+        f"{utils.tr(
+            lang,
+            'profile.summary',
+            timezone=user['timezone'],
+            langs=', '.join(langs),
+            digest_state=utils.bool_text(lang, bool(user['digest_enabled'])),
+            digest_time=user['digest_time'],
+            quiet_state=utils.bool_text(lang, bool(user['quiet_enabled'])),
+            quiet_start=user['quiet_start'],
+            quiet_end=user['quiet_end'],
+        )}"
     )
-    kb = utils.profile_menu(user)
+    kb = utils.profile_menu(user, lang)
 
     match target:
         case CallbackQuery():
@@ -64,7 +71,8 @@ async def cb_toggle(
 ) -> None:
     field = callback_data.field
     if field not in _TOGGLE_FIELDS:
-        await callback.answer("Неизвестная настройка")
+        user = await db.get_or_create_user(callback.from_user.id)
+        await callback.answer(utils.tr(utils.get_ui_lang(user), "generic.unknown_setting"))
         return
     user = await db.get_or_create_user(callback.from_user.id)
     await db.update_user(callback.from_user.id, **{field: 0 if user[field] else 1})
@@ -76,11 +84,12 @@ async def cb_toggle(
 @router.callback_query(F.data == "profile:langs")
 async def cb_langs(callback: CallbackQuery, db: Database) -> None:
     user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
     current = json.loads(user.get("preferred_langs", '["English"]'))
     await callback.message.edit_text(
-        "🌐 <b>Языки трансляций</b>\nМожно выбрать несколько:",
+        utils.tr(lang, "profile.broadcast_languages_title"),
         parse_mode="HTML",
-        reply_markup=utils.lang_picker(current),
+        reply_markup=utils.lang_picker(current, lang),
     )
     await callback.answer()
 
@@ -92,6 +101,7 @@ async def cb_toggle_lang(
     db: Database,
 ) -> None:
     user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
     current: list[str] = json.loads(user.get("preferred_langs", '["English"]'))
     lang_id = callback_data.lang_id
 
@@ -103,24 +113,28 @@ async def cb_toggle_lang(
         current = ["English"]
 
     await db.update_user(callback.from_user.id, preferred_langs=json.dumps(current))
-    await callback.message.edit_reply_markup(reply_markup=utils.lang_picker(current))
+    await callback.message.edit_reply_markup(reply_markup=utils.lang_picker(current, lang))
     await callback.answer()
 
 
 # ── Timezone ──────────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "profile:tz")
-async def cb_tz(callback: CallbackQuery) -> None:
-    await callback.message.answer("Выберите часовой пояс:", reply_markup=utils.timezone_picker())
+async def cb_tz(callback: CallbackQuery, db: Database) -> None:
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    await callback.message.answer(utils.tr(lang, "profile.choose_timezone"), reply_markup=utils.timezone_picker(lang=lang))
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("tz:"))
 async def cb_set_tz(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
     tz = callback.data.split(":", 1)[1]
     if tz == "manual":
         await callback.message.answer(
-            "Введите часовой пояс, например: <code>Europe/Berlin</code>", parse_mode="HTML"
+            utils.tr(lang, "onboarding.enter_timezone"), parse_mode="HTML"
         )
         await state.set_state(ProfileStates.editing_timezone_manual)
         await callback.answer()
@@ -133,16 +147,18 @@ async def cb_set_tz(callback: CallbackQuery, state: FSMContext, db: Database) ->
 @router.message(ProfileStates.editing_timezone_manual)
 async def msg_tz_manual(message: Message, state: FSMContext, db: Database) -> None:
     import pytz
+    user = await db.get_or_create_user(message.chat.id, message.from_user.username)
+    lang = utils.get_ui_lang(user)
     tz_input = message.text.strip()
     try:
         pytz.timezone(tz_input)
     except Exception:
-        await message.answer("❌ Неверный часовой пояс. Попробуйте снова.")
+        await message.answer(utils.tr(lang, "profile.invalid_timezone"))
         return
     await db.update_user(message.chat.id, timezone=tz_input)
     await state.clear()
     await message.answer(
-        f"✅ Часовой пояс: <code>{escape(tz_input)}</code>",
+        utils.tr(lang, "profile.timezone_updated", value=escape(tz_input)),
         parse_mode="HTML",
     )
     await _show_profile(message, db)
@@ -151,9 +167,11 @@ async def msg_tz_manual(message: Message, state: FSMContext, db: Database) -> No
 # ── Digest time ───────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "profile:digest_time")
-async def cb_digest_time(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_digest_time(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
     await callback.message.answer(
-        "Введите время дайджеста в формате <code>HH:MM</code>, например <code>08:00</code>",
+        utils.tr(lang, "profile.digest_time_prompt"),
         parse_mode="HTML",
     )
     await state.set_state(ProfileStates.editing_digest_time)
@@ -162,26 +180,29 @@ async def cb_digest_time(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(ProfileStates.editing_digest_time)
 async def msg_digest_time(message: Message, state: FSMContext, db: Database) -> None:
+    user = await db.get_or_create_user(message.chat.id, message.from_user.username)
+    lang = utils.get_ui_lang(user)
     t = message.text.strip()
     try:
         h, m = t.split(":")
         assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
         time_str = f"{int(h):02d}:{int(m):02d}"
     except Exception:
-        await message.answer("❌ Неверный формат. Пример: <code>08:30</code>", parse_mode="HTML")
+        await message.answer(utils.tr(lang, "profile.invalid_time"), parse_mode="HTML")
         return
     await db.update_user(message.chat.id, digest_time=time_str)
     await state.clear()
-    await message.answer(f"✅ Время дайджеста: <b>{time_str}</b>", parse_mode="HTML")
+    await message.answer(utils.tr(lang, "profile.digest_time_updated", value=time_str), parse_mode="HTML")
 
 
 # ── Quiet hours ───────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "profile:quiet_hours")
-async def cb_quiet_hours(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_quiet_hours(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
     await callback.message.answer(
-        "Введите тихие часы в формате <code>START END</code>\n"
-        "Например: <code>23 7</code> — с 23:00 до 07:00",
+        utils.tr(lang, "profile.quiet_hours_prompt"),
         parse_mode="HTML",
     )
     await state.set_state(ProfileStates.editing_quiet_hours)
@@ -190,13 +211,15 @@ async def cb_quiet_hours(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(ProfileStates.editing_quiet_hours)
 async def msg_quiet_hours(message: Message, state: FSMContext, db: Database) -> None:
+    user = await db.get_or_create_user(message.chat.id, message.from_user.username)
+    lang = utils.get_ui_lang(user)
     try:
         parts = message.text.strip().split()
         start, end = int(parts[0]), int(parts[1])
         assert 0 <= start <= 23 and 0 <= end <= 23
     except Exception:
-        await message.answer("❌ Неверный формат. Пример: <code>23 7</code>", parse_mode="HTML")
+        await message.answer(utils.tr(lang, "profile.invalid_quiet_hours"), parse_mode="HTML")
         return
     await db.update_user(message.chat.id, quiet_start=start, quiet_end=end)
     await state.clear()
-    await message.answer(f"✅ Тихие часы: {start}:00 – {end}:00")
+    await message.answer(utils.tr(lang, "profile.quiet_hours_updated", start=start, end=end))

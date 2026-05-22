@@ -6,6 +6,7 @@ from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import DEFAULT_SERIES_NAMES, POPULAR_TIMEZONES
+from utils.i18n import DEFAULT_UI_LANG, UI_LANGUAGE_OPTIONS, tr
 
 
 # ── CallbackData factories (TrainingSchedule pattern) ─────────────────────────
@@ -68,6 +69,7 @@ class DigestViewCD(CallbackData, prefix="dig"):
     scope: str = "all"
     ref_id: str = ""
     page: int = 0
+    pick_page: int = 0
     field: str = ""
 
 
@@ -93,46 +95,53 @@ class SubNotifyCD(CallbackData, prefix="subnotify"):
 
 # ── Static keyboards ──────────────────────────────────────────────────────────
 
-def main_menu() -> InlineKeyboardMarkup:
+def ui_language_picker() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📅 Сегодня",    callback_data="today"),
-            InlineKeyboardButton(text="📆 Неделя",     callback_data="week"),
-        ],
-        [
-            InlineKeyboardButton(text="⭐ Подписки",   callback_data="subs_menu"),
-            InlineKeyboardButton(text="🔍 Поиск",      callback_data="search_prompt"),
-        ],
-        [
-            InlineKeyboardButton(text="📚 База знаний", callback_data="kb_menu"),
-            InlineKeyboardButton(text="❤️ Избранное", callback_data="favorites"),
-        ],
-        [InlineKeyboardButton(text="⚙️ Профиль",      callback_data="profile_menu")],
+        [InlineKeyboardButton(text=label, callback_data=f"ui_lang:{lang}")]
+        for label, lang in UI_LANGUAGE_OPTIONS
     ])
 
 
-def subs_main() -> InlineKeyboardMarkup:
+def main_menu(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏎️ Серии",           callback_data="subs:series")],
-        [InlineKeyboardButton(text="🏷️ Классы",          callback_data="subs:classes")],
-        [InlineKeyboardButton(text="📋 Мои подписки",    callback_data="subs:mine")],
-        [InlineKeyboardButton(text="◀️ Меню",            callback_data="main_menu")],
+        [
+            InlineKeyboardButton(text=tr(lang, "menu.today"), callback_data="today"),
+            InlineKeyboardButton(text=tr(lang, "menu.week"), callback_data="week"),
+        ],
+        [
+            InlineKeyboardButton(text=tr(lang, "menu.subscriptions"), callback_data="subs_menu"),
+            InlineKeyboardButton(text=tr(lang, "menu.search"), callback_data="search_prompt"),
+        ],
+        [
+            InlineKeyboardButton(text=tr(lang, "menu.knowledge_base"), callback_data="kb_menu"),
+            InlineKeyboardButton(text=tr(lang, "menu.favorites"), callback_data="favorites"),
+        ],
+        [InlineKeyboardButton(text=tr(lang, "menu.profile"), callback_data="profile_menu")],
     ])
 
 
-def back_to_menu() -> InlineKeyboardMarkup:
+def subs_main(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=tr(lang, "menu.series"), callback_data="subs:series")],
+        [InlineKeyboardButton(text=tr(lang, "menu.classes"), callback_data="subs:classes")],
+        [InlineKeyboardButton(text=tr(lang, "menu.my_subscriptions"), callback_data="subs:mine")],
+        [InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")],
+    ])
+
+
+def back_to_menu(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")
+        InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")
     ]])
 
 
-def back_to_subs() -> InlineKeyboardMarkup:
+def back_to_subs(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="◀️ Подписки", callback_data="subs_menu")
+        InlineKeyboardButton(text=tr(lang, "menu.back_to_subscriptions"), callback_data="subs_menu")
     ]])
 
 
-def week_pager(page: int, total: int) -> InlineKeyboardMarkup:
+def week_pager(page: int, total: int, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     nav: list[InlineKeyboardButton] = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="◀️", callback_data=f"week_page:{page-1}"))
@@ -141,11 +150,11 @@ def week_pager(page: int, total: int) -> InlineKeyboardMarkup:
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"week_page:{page+1}"))
     return InlineKeyboardMarkup(inline_keyboard=[
         nav,
-        [InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")],
+        [InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")],
     ])
 
 
-def today_pager(page: int, total: int) -> InlineKeyboardMarkup:
+def today_pager(page: int, total: int, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     nav: list[InlineKeyboardButton] = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="◀️", callback_data=f"today_page:{page-1}"))
@@ -154,25 +163,39 @@ def today_pager(page: int, total: int) -> InlineKeyboardMarkup:
         nav.append(InlineKeyboardButton(text="▶️", callback_data=f"today_page:{page+1}"))
     return InlineKeyboardMarkup(inline_keyboard=[
         nav,
-        [InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")],
+        [InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")],
     ])
 
 
 # ── Dynamic keyboards ─────────────────────────────────────────────────────────
 
-_SERIES_GROUPS: list[tuple[str, str]] = [
-    ("mine", "✅ Мои подписки"),
-    ("popular", "🔥 Популярные"),
-    ("formula", "🏎️ Formula"),
-    ("gt_sportscar", "🚗 GT и спорткары"),
-    ("endurance_proto", "⏱️ Endurance и prototypes"),
-    ("touring_stock", "🚙 Touring"),
-    ("nascar_oval", "🇺🇸 NASCAR и oval"),
-    ("rally_raid_rx", "🧭 Rally / rallycross / raid"),
-    ("moto_bike", "🏍️ Moto"),
-    ("dirt_drift_offroad", "💨 Drift, dirt и off-road"),
-    ("other", "📦 Остальное"),
+_SERIES_GROUPS: list[str] = [
+    "mine",
+    "popular",
+    "formula",
+    "gt_sportscar",
+    "endurance_proto",
+    "touring_stock",
+    "nascar_oval",
+    "rally_raid_rx",
+    "moto_bike",
+    "dirt_drift_offroad",
+    "other",
 ]
+
+_SERIES_GROUP_LABELS: dict[str, dict[str, str]] = {
+    "mine": {"ru": "✅ Мои подписки", "en": "✅ My Subscriptions"},
+    "popular": {"ru": "🔥 Популярные", "en": "🔥 Popular"},
+    "formula": {"ru": "🏎️ Formula", "en": "🏎️ Formula"},
+    "gt_sportscar": {"ru": "🚗 GT и спорткары", "en": "🚗 GT and Sports Cars"},
+    "endurance_proto": {"ru": "⏱️ Endurance и prototypes", "en": "⏱️ Endurance and Prototypes"},
+    "touring_stock": {"ru": "🚙 Touring", "en": "🚙 Touring"},
+    "nascar_oval": {"ru": "🇺🇸 NASCAR и oval", "en": "🇺🇸 NASCAR and Oval"},
+    "rally_raid_rx": {"ru": "🧭 Rally / rallycross / raid", "en": "🧭 Rally / Rallycross / Raid"},
+    "moto_bike": {"ru": "🏍️ Moto", "en": "🏍️ Moto"},
+    "dirt_drift_offroad": {"ru": "💨 Drift, dirt и off-road", "en": "💨 Drift, Dirt, and Off-road"},
+    "other": {"ru": "📦 Остальное", "en": "📦 Other"},
+}
 
 _SERIES_GROUP_CODES: dict[str, str] = {
     "menu": "mn",
@@ -195,18 +218,8 @@ _SERIES_GROUP_CODES_REV = {value: key for key, value in _SERIES_GROUP_CODES.item
 _POPULAR_SERIES_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("Formula 1", ("formula 1",)),
     ("MotoGP", ("motogp",)),
-    ("Formula E", ("formula e",)),
-    ("Formula 2", ("formula 2",)),
-    ("Formula 3", ("formula 3",)),
     ("World Endurance Championship", ("world endurance championship",)),
     ("IMSA", ("imsa weathertech sportscar championship", "imsa sportscar championship")),
-    ("INDYCAR SERIES", ("indycar",)),
-    ("NASCAR Cup Series", ("nascar cup series",)),
-    ("World Rally Championship", ("world rally championship",)),
-    ("GT World Challenge Europe", ("gt world challenge europe",)),
-    ("Super Formula", ("super formula",)),
-    ("Supercars Championship", ("supercars championship",)),
-    ("DTM", ("dtm", "deutsche tourenwagen masters")),
 ]
 
 
@@ -418,6 +431,80 @@ _SERIES_SUBGROUPS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
     ],
 }
 
+_SERIES_SUBGROUP_LABELS: dict[str, dict[str, dict[str, str]]] = {
+    "formula": {
+        "fm": {"ru": "Formula", "en": "Formula"},
+        "sf": {"ru": "Super Formula", "en": "Super Formula"},
+        "f4": {"ru": "F4", "en": "F4"},
+        "fr": {"ru": "Formula Regional", "en": "Formula Regional"},
+        "us": {"ru": "Road to Indy / USF", "en": "Road to Indy / USF"},
+    },
+    "endurance_proto": {
+        "we": {"ru": "WEC", "en": "WEC"},
+        "im": {"ru": "IMSA", "en": "IMSA"},
+        "el": {"ru": "ELMS", "en": "ELMS"},
+        "as": {"ru": "Asian Le Mans", "en": "Asian Le Mans"},
+        "lp": {"ru": "Le Mans Cup / Prototype Cup", "en": "Le Mans Cup / Prototype Cup"},
+        "24": {"ru": "24H Series", "en": "24H Series"},
+    },
+    "gt_sportscar": {
+        "po": {"ru": "Porsche", "en": "Porsche"},
+        "fe": {"ru": "Ferrari Challenge", "en": "Ferrari Challenge"},
+        "gw": {"ru": "GT World Challenge", "en": "GT World Challenge"},
+        "gt": {"ru": "GT", "en": "GT"},
+        "g4": {"ru": "GT4", "en": "GT4"},
+        "mc": {"ru": "Марочные кубки", "en": "One-make Cups"},
+    },
+    "touring_stock": {
+        "tc": {"ru": "Touring Cars", "en": "Touring Cars"},
+        "cr": {"ru": "TCR", "en": "TCR"},
+        "tr": {"ru": "Trucks", "en": "Trucks"},
+        "st": {"ru": "Stock Cars South America", "en": "Stock Cars South America"},
+    },
+    "nascar_oval": {
+        "in": {"ru": "IndyCar", "en": "IndyCar"},
+        "cu": {"ru": "NASCAR Cup", "en": "NASCAR Cup"},
+        "ns": {"ru": "NASCAR support", "en": "NASCAR Support"},
+        "ar": {"ru": "ARCA", "en": "ARCA"},
+        "sm": {"ru": "Sprint Cars / Modified / Late Models", "en": "Sprint Cars / Modified / Late Models"},
+    },
+    "rally_raid_rx": {
+        "wr": {"ru": "WRC", "en": "WRC"},
+        "er": {"ru": "ERC", "en": "ERC"},
+        "rx": {"ru": "Rallycross", "en": "Rallycross"},
+        "rd": {"ru": "Dakar / Raid", "en": "Dakar / Raid"},
+        "rt": {"ru": "National Rally", "en": "National Rally"},
+    },
+    "moto_bike": {
+        "gp": {"ru": "MotoGP", "en": "MotoGP"},
+        "sb": {"ru": "Superbike", "en": "Superbike"},
+        "am": {"ru": "AMA", "en": "AMA"},
+        "fm": {"ru": "FIM", "en": "FIM"},
+    },
+    "other": {
+        "jr": {"ru": "Junior / feeder", "en": "Junior / Feeder"},
+        "ka": {"ru": "Karting", "en": "Karting"},
+        "dr": {"ru": "Drag racing", "en": "Drag Racing"},
+        "di": {"ru": "Short track / dirt", "en": "Short Track / Dirt"},
+        "cu": {"ru": "Cups / club racing", "en": "Cups / Club Racing"},
+        "tn": {"ru": "Turismo / national", "en": "Turismo / National"},
+        "hh": {"ru": "Historic / hillclimb", "en": "Historic / Hillclimb"},
+        "bm": {"ru": "Bikes other", "en": "Other Bikes"},
+        "sp": {"ru": "Special / adventure", "en": "Special / Adventure"},
+    },
+}
+
+_SERIES_NESTED_SUBGROUP_LABELS: dict[str, dict[str, dict[str, dict[str, str]]]] = {
+    "gt_sportscar": {
+        "po": {
+            "su": {"ru": "Porsche Supercup", "en": "Porsche Supercup"},
+            "ca": {"ru": "Porsche Carrera Cup", "en": "Porsche Carrera Cup"},
+            "sp": {"ru": "Porsche Sprint Challenge", "en": "Porsche Sprint Challenge"},
+            "en": {"ru": "Porsche Endurance", "en": "Porsche Endurance"},
+        },
+    },
+}
+
 _SERIES_NESTED_SUBGROUPS: dict[str, dict[str, list[tuple[str, str, tuple[str, ...]]]]] = {
     "gt_sportscar": {
         "po": [
@@ -514,26 +601,36 @@ def _series_order_key(series: dict, group: str) -> tuple[int, str]:
     return (20, name)
 
 
-def _series_subgroup_label(group: str, subgroup: str) -> str:
+def _label_text(entry: dict[str, str], lang: str) -> str:
+    return entry.get(lang) or entry.get("ru") or next(iter(entry.values()))
+
+
+def _series_subgroup_label(group: str, subgroup: str, lang: str = DEFAULT_UI_LANG) -> str:
     parent, child = _split_subgroup(subgroup)
-    for code, label, _tokens in _SERIES_SUBGROUPS.get(group, []):
+    if child:
+        labels = _SERIES_NESTED_SUBGROUP_LABELS.get(group, {}).get(parent, {}).get(child)
+        if labels:
+            return _label_text(labels, lang)
+    for code, _label, _tokens in _SERIES_SUBGROUPS.get(group, []):
         if code == parent:
-            return label
+            return _label_text(_SERIES_SUBGROUP_LABELS.get(group, {}).get(code, {"ru": code}), lang)
     defs = _subgroup_defs(group, parent)
-    for code, label, _tokens in defs:
+    for code, _label, _tokens in defs:
         if code == child:
-            return label
+            if child and parent:
+                labels = _SERIES_NESTED_SUBGROUP_LABELS.get(group, {}).get(parent, {}).get(code, {"ru": code})
+                return _label_text(labels, lang)
     if child and parent:
-        return _series_subgroup_label(group, parent)
+        return _series_subgroup_label(group, parent, lang)
     if parent == "ot":
-        return "Остальное"
+        return "Other" if lang == "en" else "Остальное"
     if child == "ot":
-        return f"Остальное { _series_subgroup_label(group, parent) }"
-    return "Остальное"
+        return f"{'Other' if lang == 'en' else 'Остальное'} {_series_subgroup_label(group, parent, lang)}"
+    return "Other" if lang == "en" else "Остальное"
 
 
-def series_subgroup_label(group: str, subgroup: str) -> str:
-    return _series_subgroup_label(group, subgroup)
+def series_subgroup_label(group: str, subgroup: str, lang: str = DEFAULT_UI_LANG) -> str:
+    return _series_subgroup_label(group, subgroup, lang)
 
 
 def _split_subgroup(subgroup: str) -> tuple[str, str]:
@@ -587,11 +684,10 @@ def series_has_subgroups(group: str, items: list[dict], subgroup: str = "") -> b
     return _series_has_subgroups(group, items, subgroup)
 
 
-def series_group_label(group: str) -> str:
-    for key, label in _SERIES_GROUPS:
-        if key == group:
-            return label
-    return group or "Все серии"
+def series_group_label(group: str, lang: str = DEFAULT_UI_LANG) -> str:
+    if group in _SERIES_GROUP_LABELS:
+        return _label_text(_SERIES_GROUP_LABELS[group], lang)
+    return group or ("All Series" if lang == "en" else "Все серии")
 
 
 def filter_series_by_group(
@@ -655,15 +751,17 @@ def series_subgroup_menu(
     group: str,
     subscribed_ids: set[str],
     subgroup: str = "",
+    lang: str = DEFAULT_UI_LANG,
 ) -> InlineKeyboardMarkup:
     items = filter_series_by_group(all_series, group, subscribed_ids, subgroup=subgroup)
     rows: list[list[InlineKeyboardButton]] = []
     defs = _subgroup_defs(group, subgroup)
-    for code, label, _tokens in defs:
+    for code, _label, _tokens in defs:
         code_value = f"{subgroup}{_SUBGROUP_PATH_SEPARATOR}{code}" if subgroup else code
         count = len(filter_series_by_group(all_series, group, subscribed_ids, subgroup=code_value))
         if count == 0:
             continue
+        label = series_subgroup_label(group, code_value, lang)
         rows.append([InlineKeyboardButton(
             text=f"{label} · {count}",
             callback_data=SeriesBrowseCD(
@@ -673,7 +771,8 @@ def series_subgroup_menu(
             ).pack(),
         )])
     other_value = f"{subgroup}{_SUBGROUP_PATH_SEPARATOR}ot" if subgroup else "ot"
-    other_label = f"Остальное {series_subgroup_label(group, subgroup)}" if subgroup else "Остальное"
+    other_prefix = "Other" if lang == "en" else "Остальное"
+    other_label = f"{other_prefix} {series_subgroup_label(group, subgroup, lang)}" if subgroup else other_prefix
     other_count = len(filter_series_by_group(all_series, group, subscribed_ids, subgroup=other_value))
     if other_count:
         rows.append([InlineKeyboardButton(
@@ -691,7 +790,7 @@ def series_subgroup_menu(
         back_group = series_group_to_callback(group)
         back_subgroup = parent_subgroup
     rows.append([InlineKeyboardButton(
-        text="◀️ К подгруппам" if subgroup else "◀️ К группам",
+        text=("◀️ Back to Subgroups" if subgroup else "◀️ Back to Groups") if lang == "en" else ("◀️ К подгруппам" if subgroup else "◀️ К группам"),
         callback_data=SeriesBrowseCD(group=series_group_to_callback("menu"), page=0).pack(),
     )])
     if subgroup:
@@ -703,19 +802,20 @@ def series_subgroup_menu(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def series_group_menu(all_series: list[dict], subscribed_ids: set[str]) -> InlineKeyboardMarkup:
+def series_group_menu(all_series: list[dict], subscribed_ids: set[str], lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    for key, label in _SERIES_GROUPS:
+    for key in _SERIES_GROUPS:
         count = len(filter_series_by_group(all_series, key, subscribed_ids))
+        label = series_group_label(key, lang)
         rows.append([InlineKeyboardButton(
             text=f"{label} · {count}",
             callback_data=SeriesBrowseCD(group=series_group_to_callback(key), page=0).pack(),
         )])
-    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="subs_menu")])
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.back"), callback_data="subs_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def timezone_picker(page: int = 0) -> InlineKeyboardMarkup:
+def timezone_picker(page: int = 0, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     per = 8
     zones = POPULAR_TIMEZONES[page * per: (page + 1) * per]
     
@@ -736,7 +836,7 @@ def timezone_picker(page: int = 0) -> InlineKeyboardMarkup:
         rows.append(nav)
     
     # Кнопка ручного ввода
-    rows.append([InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="tz:manual")])
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.enter_manually"), callback_data="tz:manual")])
     
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -748,6 +848,7 @@ def series_list(
     subgroup:      str = "",
     page:          int = 0,
     page_size:     int = 8,
+    lang:          str = DEFAULT_UI_LANG,
 ) -> InlineKeyboardMarkup:
     filtered_series = filter_series_by_group(all_series, group, subscribed_ids, subgroup=subgroup)
     chunk = filtered_series[page * page_size: (page + 1) * page_size]
@@ -804,7 +905,7 @@ def series_list(
         back_subgroup = subgroup.split(_SUBGROUP_PATH_SEPARATOR, 1)[0]
         back_group = series_group_to_callback(group)
     btns.append([InlineKeyboardButton(
-        text="◀️ К подгруппам" if subgroup else "◀️ К группам",
+        text=f"◀️ {'К подгруппам' if subgroup else 'К группам'}" if lang == "ru" else f"◀️ {'Back to Subgroups' if subgroup else 'Back to Groups'}",
         callback_data=SeriesBrowseCD(
             group=back_group,
             page=0,
@@ -817,6 +918,7 @@ def series_list(
 def class_list(
     all_classes:   list[dict],
     subscribed_ids: set[str],
+    lang: str = DEFAULT_UI_LANG,
 ) -> InlineKeyboardMarkup:
     btns = []
     row: list[InlineKeyboardButton] = []
@@ -831,12 +933,12 @@ def class_list(
             row = []
     if row:
         btns.append(row)
-    btns.append([InlineKeyboardButton(text="◀️ Назад", callback_data="subs_menu")])
+    btns.append([InlineKeyboardButton(text=tr(lang, "menu.back"), callback_data="subs_menu")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
 
-def session_actions(session_id: str, is_fav: bool) -> InlineKeyboardMarkup:
-    fav_text = "💔 Убрать из избранного" if is_fav else "❤️ В избранное"
+def session_actions(session_id: str, is_fav: bool, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
+    fav_text = tr(lang, "menu.favorite_remove") if is_fav else tr(lang, "menu.favorite_add")
     fav_action = "remove" if is_fav else "add"
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
@@ -844,30 +946,30 @@ def session_actions(session_id: str, is_fav: bool) -> InlineKeyboardMarkup:
             callback_data=FavCD(action=fav_action, session_id=session_id).pack(),
         ),
         InlineKeyboardButton(
-            text="🔔 Напомнить",
+            text=tr(lang, "menu.remind"),
             callback_data=RemindCD(action="menu", session_id=session_id).pack(),
         ),
     ]])
 
 
-def reminder_menu(session_id: str, active_types: set[str]) -> InlineKeyboardMarkup:
+def reminder_menu(session_id: str, active_types: set[str], lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     def label(remind_type: str, title: str) -> str:
         return f"{'✅ ' if remind_type in active_types else ''}{title}"
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=label("1day", "За сутки"),
+            text=label("1day", tr(lang, "menu.remind_1day")),
             callback_data=RemindCD(action="toggle", session_id=session_id, remind_type="1day").pack(),
         )],
         [InlineKeyboardButton(
-            text=label("1hour", "За час"),
+            text=label("1hour", tr(lang, "menu.remind_1hour")),
             callback_data=RemindCD(action="toggle", session_id=session_id, remind_type="1hour").pack(),
         )],
         [InlineKeyboardButton(
-            text=label("start", "На старт"),
+            text=label("start", tr(lang, "menu.remind_start")),
             callback_data=RemindCD(action="toggle", session_id=session_id, remind_type="start").pack(),
         )],
-        [InlineKeyboardButton(text="◀️ К сессии", callback_data=f"session:{session_id}")],
+        [InlineKeyboardButton(text=tr(lang, "menu.back_to_session"), callback_data=f"session:{session_id}")],
     ])
 
 
@@ -876,6 +978,7 @@ def history_filter_menu(
     ref_id: str,
     page: int,
     total_pages: int,
+    lang: str = DEFAULT_UI_LANG,
 ) -> InlineKeyboardMarkup:
     def marker(value: str) -> str:
         return "✅ " if filter_type == value else ""
@@ -883,34 +986,34 @@ def history_filter_menu(
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{marker('all')}Все",
+                text=f"{marker('all')}{tr(lang, 'menu.all')}",
                 callback_data=HistoryViewCD(filter_type="all", page=0).pack(),
             ),
             InlineKeyboardButton(
-                text=f"{marker('race')}Гонки",
+                text=f"{marker('race')}{tr(lang, 'menu.races')}",
                 callback_data=HistoryViewCD(filter_type="race", page=0).pack(),
             ),
         ],
         [
             InlineKeyboardButton(
-                text=f"{marker('qualifying')}Квалы",
+                text=f"{marker('qualifying')}{tr(lang, 'menu.qualifying')}",
                 callback_data=HistoryViewCD(filter_type="qualifying", page=0).pack(),
             ),
             InlineKeyboardButton(
-                text=f"{marker('practice')}Практики",
+                text=f"{marker('practice')}{tr(lang, 'menu.practice')}",
                 callback_data=HistoryViewCD(filter_type="practice", page=0).pack(),
             ),
         ],
         [
-            InlineKeyboardButton(text="🏎️ По серии", callback_data=HistoryPickCD(kind="series", page=0).pack()),
-            InlineKeyboardButton(text="🏷️ По классу", callback_data=HistoryPickCD(kind="vehicle_class", page=0).pack()),
+            InlineKeyboardButton(text=tr(lang, "menu.by_series"), callback_data=HistoryPickCD(kind="series", page=0).pack()),
+            InlineKeyboardButton(text=tr(lang, "menu.by_class"), callback_data=HistoryPickCD(kind="vehicle_class", page=0).pack()),
         ],
     ]
 
     if filter_type in {"series", "vehicle_class"} and ref_id:
         rows.append([
             InlineKeyboardButton(
-                text="❌ Сбросить фильтр",
+                text=tr(lang, "menu.reset_filter"),
                 callback_data=HistoryViewCD(filter_type="all", page=0).pack(),
             )
         ])
@@ -938,6 +1041,7 @@ def history_pick_menu(
     items: list[dict],
     page: int = 0,
     page_size: int = 8,
+    lang: str = DEFAULT_UI_LANG,
 ) -> InlineKeyboardMarkup:
     chunk = items[page * page_size: (page + 1) * page_size]
     rows = []
@@ -962,7 +1066,7 @@ def history_pick_menu(
             nav.append(InlineKeyboardButton(text="▶️", callback_data=HistoryPickCD(kind=kind, page=page + 1).pack()))
         rows.append(nav)
 
-    rows.append([InlineKeyboardButton(text="◀️ К истории", callback_data="history")])
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.back_to_history"), callback_data="history")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -971,11 +1075,12 @@ def digest_pick_menu(
     subs: list[dict],
     page: int = 0,
     page_size: int = 8,
+    lang: str = DEFAULT_UI_LANG,
 ) -> InlineKeyboardMarkup:
     chunk = subs[page * page_size: (page + 1) * page_size]
     rows = [[InlineKeyboardButton(
-        text="📋 Все подписки",
-        callback_data=DigestViewCD(kind=kind, action="view", scope="all", page=0).pack(),
+        text=tr(lang, "menu.all_subscriptions"),
+        callback_data=DigestViewCD(kind=kind, action="view", scope="all", page=0, pick_page=page).pack(),
     )]]
     for sub in chunk:
         kind_icon = "🏎️" if sub["type"] == "series" else "🏷️"
@@ -987,6 +1092,7 @@ def digest_pick_menu(
                 scope=sub["type"],
                 ref_id=sub["ref_id"][:8],
                 page=0,
+                pick_page=page,
             ).pack(),
         )])
 
@@ -1006,7 +1112,7 @@ def digest_pick_menu(
             ))
         rows.append(nav)
 
-    rows.append([InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")])
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1016,7 +1122,9 @@ def digest_view_menu(
     total_pages: int,
     selected_sub: dict | None = None,
     user: dict | None = None,
+    pick_page: int = 0,
     allow_pick: bool = False,
+    lang: str = DEFAULT_UI_LANG,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if total_pages > 1:
@@ -1030,6 +1138,7 @@ def digest_view_menu(
                     scope=selected_sub["type"] if selected_sub else "all",
                     ref_id=selected_sub["ref_id"][:8] if selected_sub else "",
                     page=page - 1,
+                    pick_page=pick_page,
                 ).pack(),
             ))
         nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
@@ -1042,6 +1151,7 @@ def digest_view_menu(
                     scope=selected_sub["type"] if selected_sub else "all",
                     ref_id=selected_sub["ref_id"][:8] if selected_sub else "",
                     page=page + 1,
+                    pick_page=pick_page,
                 ).pack(),
             ))
         rows.append(nav)
@@ -1049,7 +1159,7 @@ def digest_view_menu(
     if user:
         rows.append([
             InlineKeyboardButton(
-                text=f"{'✅' if user.get('show_qualifying', 1) else '❌'} Квалификации",
+                text=f"{'✅' if user.get('show_qualifying', 1) else '❌'} {tr(lang, 'menu.qualifying')}",
                 callback_data=DigestViewCD(
                     kind=kind,
                     action="toggle",
@@ -1057,10 +1167,11 @@ def digest_view_menu(
                     ref_id=selected_sub["ref_id"][:8] if selected_sub else "",
                     field="show_qualifying",
                     page=page,
+                    pick_page=pick_page,
                 ).pack(),
             ),
             InlineKeyboardButton(
-                text=f"{'✅' if user.get('show_practice', 1) else '❌'} Практики",
+                text=f"{'✅' if user.get('show_practice', 1) else '❌'} {tr(lang, 'menu.practice')}",
                 callback_data=DigestViewCD(
                     kind=kind,
                     action="toggle",
@@ -1068,19 +1179,20 @@ def digest_view_menu(
                     ref_id=selected_sub["ref_id"][:8] if selected_sub else "",
                     field="show_practice",
                     page=page,
+                    pick_page=pick_page,
                 ).pack(),
             ),
         ])
 
     if allow_pick:
         rows.append([InlineKeyboardButton(
-            text="◀️ Назад",
-            callback_data=DigestViewCD(kind=kind, action="pick", page=0).pack(),
+            text=tr(lang, "menu.back"),
+            callback_data=DigestViewCD(kind=kind, action="pick", page=pick_page).pack(),
         )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def profile_menu(user: dict) -> InlineKeyboardMarkup:
+def profile_menu(user: dict, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     def tog(field: str) -> str:
         return ProfileToggleCD(field=field).pack()
 
@@ -1089,34 +1201,34 @@ def profile_menu(user: dict) -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"🌍 Часовой пояс: {user['timezone']}",
+            text=f"{tr(lang, 'menu.timezone')}: {user['timezone']}",
             callback_data="profile:tz",
         )],
-        [InlineKeyboardButton(text="🌐 Языки трансляций", callback_data="profile:langs")],
+        [InlineKeyboardButton(text=tr(lang, "menu.broadcast_languages"), callback_data="profile:langs")],
         [InlineKeyboardButton(
-            text=f"{icon('digest_enabled')} Дайджест по понедельникам ({user['digest_time']})",
+            text=f"{icon('digest_enabled')} {tr(lang, 'menu.monday_digest')} ({user['digest_time']})",
             callback_data=tog("digest_enabled"),
         )],
         [InlineKeyboardButton(
-            text=f"{icon('show_no_broadcast')} Гонки без трансляции",
+            text=f"{icon('show_no_broadcast')} {tr(lang, 'menu.without_broadcasts')}",
             callback_data=tog("show_no_broadcast"),
         )],
         [InlineKeyboardButton(
-            text=f"{icon('quiet_enabled')} Тихие часы ({user['quiet_start']}:00–{user['quiet_end']}:00)",
+            text=f"{icon('quiet_enabled')} {tr(lang, 'menu.quiet_hours_state')} ({user['quiet_start']}:00–{user['quiet_end']}:00)",
             callback_data=tog("quiet_enabled"),
         )],
         [
-            InlineKeyboardButton(text=f"{icon('notify_3days')} За 3 дня", callback_data=tog("notify_3days")),
-            InlineKeyboardButton(text=f"{icon('notify_1day')} За сутки",  callback_data=tog("notify_1day")),
+            InlineKeyboardButton(text=f"{icon('notify_3days')} {'За 3 дня' if lang == 'ru' else '3 Days Before'}", callback_data=tog("notify_3days")),
+            InlineKeyboardButton(text=f"{icon('notify_1day')} {tr(lang, 'menu.remind_1day')}",  callback_data=tog("notify_1day")),
         ],
         [
-            InlineKeyboardButton(text=f"{icon('notify_1hour')} За час",   callback_data=tog("notify_1hour")),
-            InlineKeyboardButton(text=f"{icon('notify_start')} Старт",    callback_data=tog("notify_start")),
+            InlineKeyboardButton(text=f"{icon('notify_1hour')} {tr(lang, 'menu.remind_1hour')}", callback_data=tog("notify_1hour")),
+            InlineKeyboardButton(text=f"{icon('notify_start')} {'Старт' if lang == 'ru' else 'Start'}", callback_data=tog("notify_start")),
         ],
-        [InlineKeyboardButton(text="🔔 Квалы и практики", callback_data="subs:notify")],
-        [InlineKeyboardButton(text="✏️ Время дайджеста",   callback_data="profile:digest_time")],
-        [InlineKeyboardButton(text="✏️ Тихие часы",        callback_data="profile:quiet_hours")],
-        [InlineKeyboardButton(text="◀️ Меню",              callback_data="main_menu")],
+        [InlineKeyboardButton(text=tr(lang, "menu.notification_details"), callback_data="subs:notify")],
+        [InlineKeyboardButton(text=tr(lang, "menu.digest_time"), callback_data="profile:digest_time")],
+        [InlineKeyboardButton(text=tr(lang, "menu.quiet_hours"), callback_data="profile:quiet_hours")],
+        [InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")],
     ])
 
 
@@ -1132,7 +1244,7 @@ _LANG_OPTIONS: list[tuple[str, str]] = [
 ]
 
 
-def lang_picker(current: list[str]) -> InlineKeyboardMarkup:
+def lang_picker(current: list[str], lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     btns = []
     row: list[InlineKeyboardButton] = []
     for label, lid in _LANG_OPTIONS:
@@ -1146,11 +1258,11 @@ def lang_picker(current: list[str]) -> InlineKeyboardMarkup:
             row = []
     if row:
         btns.append(row)
-    btns.append([InlineKeyboardButton(text="✅ Готово", callback_data="profile_menu")])
+    btns.append([InlineKeyboardButton(text=tr(lang, "menu.done"), callback_data="profile_menu")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
 
-def kb_menu(series_kb: dict) -> InlineKeyboardMarkup:
+def kb_menu(series_kb: dict, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     btns = [
         [InlineKeyboardButton(
             text=f"{info['emoji']} {name}",
@@ -1158,11 +1270,11 @@ def kb_menu(series_kb: dict) -> InlineKeyboardMarkup:
         )]
         for name, info in series_kb.items()
     ]
-    btns.append([InlineKeyboardButton(text="◀️ Меню", callback_data="main_menu")])
+    btns.append([InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
 
-def subscriptions_notify_list(subs: list[dict]) -> InlineKeyboardMarkup:
+def subscriptions_notify_list(subs: list[dict], lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     rows = []
     for sub in subs:
         kind = "🏎️" if sub["type"] == "series" else "🏷️"
@@ -1174,17 +1286,17 @@ def subscriptions_notify_list(subs: list[dict]) -> InlineKeyboardMarkup:
                 ref_id=sub["ref_id"][:8],
             ).pack(),
         )])
-    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="profile_menu")])
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.back"), callback_data="profile_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def subscription_notify_menu(sub: dict) -> InlineKeyboardMarkup:
+def subscription_notify_menu(sub: dict, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     def icon(field: str) -> str:
         return "✅" if sub.get(field, 1) else "❌"
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"{icon('qualifying_notify')} Квалификации",
+            text=f"{icon('qualifying_notify')} {tr(lang, 'menu.qualifying')}",
             callback_data=SubNotifyCD(
                 action="toggle",
                 type=sub["type"],
@@ -1193,7 +1305,7 @@ def subscription_notify_menu(sub: dict) -> InlineKeyboardMarkup:
             ).pack(),
         )],
         [InlineKeyboardButton(
-            text=f"{icon('practice_notify')} Практики и тесты",
+            text=f"{icon('practice_notify')} {tr(lang, 'menu.qualifying_and_tests')}",
             callback_data=SubNotifyCD(
                 action="toggle",
                 type=sub["type"],
@@ -1201,5 +1313,5 @@ def subscription_notify_menu(sub: dict) -> InlineKeyboardMarkup:
                 field="practice_notify",
             ).pack(),
         )],
-        [InlineKeyboardButton(text="◀️ К списку", callback_data="subs:notify")],
+        [InlineKeyboardButton(text=tr(lang, "menu.back_to_list"), callback_data="subs:notify")],
     ])

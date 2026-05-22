@@ -48,6 +48,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS users (
                 chat_id           INTEGER PRIMARY KEY,
                 username          TEXT,
+                ui_lang           TEXT    NOT NULL DEFAULT 'ru',
                 timezone          TEXT    NOT NULL DEFAULT 'Europe/Moscow',
                 preferred_langs   TEXT    NOT NULL DEFAULT '["English"]',
                 digest_enabled    INTEGER NOT NULL DEFAULT 0,
@@ -154,6 +155,11 @@ class Database:
         if "show_qualifying" not in columns:
             await self._db.execute(
                 "ALTER TABLE users ADD COLUMN show_qualifying INTEGER NOT NULL DEFAULT 1"
+            )
+
+        if "ui_lang" not in columns:
+            await self._db.execute(
+                "ALTER TABLE users ADD COLUMN ui_lang TEXT NOT NULL DEFAULT 'ru'"
             )
 
         if "show_practice" not in columns:

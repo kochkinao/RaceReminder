@@ -12,9 +12,6 @@ from utils.cache import MemoryCache
 
 log = logging.getLogger(__name__)
 router = Router()
-_TODAY_HEADER = "📅 <b>Мой гоночный день</b>"
-_WEEK_HEADER = "📆 <b>Моя гоночная неделя</b>"
-_HISTORY_HEADER = "📖 <b>История по подпискам</b>"
 
 
 async def _subs_ids(db: Database, chat_id: int) -> tuple[set[str], set[str]]:
@@ -95,27 +92,33 @@ def _digest_summary_text(
     header: str,
     sessions: list[dict],
     subs: list[dict],
+    lang: str,
 ) -> str:
     series_count = sum(1 for sub in subs if sub["type"] == "series")
     class_count = sum(1 for sub in subs if sub["type"] == "vehicle_class")
-    label = "день" if kind == "today" else "неделю"
-    return (
-        f"{header}\n\n"
-        f"Найдено <b>{len(sessions)}</b> сессий на {label}.\n"
-        f"Подписок: серии — <b>{series_count}</b>, классы — <b>{class_count}</b>.\n\n"
-        f"Выберите серию или класс, чтобы сузить дайджест."
+    label = utils.tr(lang, "digest.period_today" if kind == "today" else "digest.period_week")
+    return utils.tr(
+        lang,
+        "digest.summary",
+        header=header,
+        count=len(sessions),
+        period=label,
+        series_count=series_count,
+        class_count=class_count,
     )
 
 
-def _selected_digest_header(header: str, sub: dict | None) -> str:
+def _selected_digest_header(header: str, sub: dict | None, lang: str) -> str:
     if not sub:
         return header
     prefix = "🏎️" if sub["type"] == "series" else "🏷️"
-    return f"{header}\nФильтр: {prefix} <b>{sub['ref_name']}</b>"
+    return f"{header}\n{utils.tr(lang, 'digest.filter')}: {prefix} <b>{sub['ref_name']}</b>"
 
 
-def _is_empty_digest(messages: list[str], header: str) -> bool:
-    empty_text = (header + "\n\n" if header else "") + "😴 Нет гонок по вашим подпискам."
+def _is_empty_digest(messages: list[str], header: str, lang: str) -> bool:
+    empty_text = (header + "\n\n" if header else "") + (
+        "😴 No sessions found for your subscriptions." if lang == "en" else "😴 Нет гонок по вашим подпискам."
+    )
     return len(messages) == 1 and messages[0] == empty_text
 
 
@@ -158,6 +161,7 @@ def _history_pages(
     user_tz: str,
     user_langs: list[str],
     header: str,
+    ui_lang: str,
 ) -> list[str]:
     pages: list[str] = []
     current = header + "\n"
@@ -170,6 +174,7 @@ def _history_pages(
             user_tz=user_tz,
             user_langs=user_langs,
             compact=True,
+            ui_lang=ui_lang,
         )
         if not card:
             continue
@@ -183,7 +188,7 @@ def _history_pages(
     if current.strip():
         pages.append(current)
     if not pages:
-        pages.append(header + "\n\n😴 Ничего не найдено по выбранному фильтру.")
+        pages.append(header + "\n\n" + utils.tr(ui_lang, "digest.no_filter_results"))
     return pages
 
 
@@ -191,20 +196,21 @@ def _history_filter_label(
     filter_type: str,
     ref_id: str,
     subs: list[dict],
+    lang: str,
 ) -> str:
     if filter_type in {"all", ""}:
-        return "все сессии"
+        return utils.tr(lang, "digest.filter_all")
     if filter_type == "race":
-        return "только гонки"
+        return utils.tr(lang, "digest.filter_race")
     if filter_type == "qualifying":
-        return "только квалификации"
+        return utils.tr(lang, "digest.filter_qualifying")
     if filter_type == "practice":
-        return "только практики"
+        return utils.tr(lang, "digest.filter_practice")
 
     for sub in subs:
         if sub["ref_id"] == ref_id:
-            prefix = "серия" if filter_type == "series" else "класс"
-            return f"{prefix}: {sub['ref_name']}"
+            key = "digest.filter_series" if filter_type == "series" else "digest.filter_class"
+            return utils.tr(lang, key, name=sub["ref_name"])
     return filter_type
 
 
@@ -242,6 +248,7 @@ async def _render_digest(
     subs: list[dict],
     header: str,
     page: int = 0,
+    pick_page: int = 0,
     scope: str = "all",
     ref_id: str = "",
     action: str = "view",
@@ -249,18 +256,19 @@ async def _render_digest(
 ) -> None:
     selected_sub = _resolve_subscription(subs, scope, ref_id)
     user_langs = json.loads(user.get("preferred_langs", '["English"]'))
+    ui_lang = utils.get_ui_lang(user)
 
     if len(subs) <= 1 and not selected_sub and subs:
         selected_sub = subs[0]
 
     filtered_sessions = _filter_digest_sessions(sessions, subs, user, selected_sub if scope != "all" or len(subs) <= 1 else None)
-    view_header = _selected_digest_header(header, selected_sub if scope != "all" or len(subs) <= 1 else None)
+    view_header = _selected_digest_header(header, selected_sub if scope != "all" or len(subs) <= 1 else None, ui_lang)
 
     if action == "pick" and len(subs) > 1:
         await _send_or_edit_digest(
             target,
-            text=_digest_summary_text(kind, header, filtered_sessions, subs),
-            reply_markup=utils.digest_pick_menu(kind, subs, page),
+            text=_digest_summary_text(kind, header, filtered_sessions, subs, ui_lang),
+            reply_markup=utils.digest_pick_menu(kind, subs, page, lang=ui_lang),
             as_edit=as_edit,
         )
         return
@@ -273,16 +281,19 @@ async def _render_digest(
         user_langs=user_langs,
         show_no_bc=bool(user.get("show_no_broadcast", 1)),
         header=view_header,
+        ui_lang=ui_lang,
     )
 
-    if _is_empty_digest(messages, view_header):
+    if _is_empty_digest(messages, view_header, ui_lang):
         kb = utils.digest_view_menu(
             kind,
             0,
             1,
             selected_sub=selected_sub if scope != "all" or len(subs) <= 1 else None,
             user=user,
+            pick_page=pick_page,
             allow_pick=len(subs) > 1,
+            lang=ui_lang,
         )
         await _send_or_edit_digest(
             target,
@@ -299,7 +310,9 @@ async def _render_digest(
         len(messages),
         selected_sub=selected_sub if scope != "all" or len(subs) <= 1 else None,
         user=user,
+        pick_page=pick_page,
         allow_pick=len(subs) > 1,
+        lang=ui_lang,
     )
     await _send_or_edit_digest(
         target,
@@ -317,7 +330,8 @@ async def cmd_today(message: Message, db: Database, mem: MemoryCache) -> None:
 
 @router.callback_query(F.data == "today")
 async def cb_today(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
-    await callback.answer("Загружаю...")
+    user = await db.get_or_create_user(callback.from_user.id)
+    await callback.answer(utils.tr(utils.get_ui_lang(user), "digest.loading"))
     await _handle_today(callback.message, db, mem, chat_id=callback.from_user.id, as_edit=True)
 
 
@@ -335,10 +349,11 @@ async def _toggle_digest_subscription(
     mem: MemoryCache,
 ) -> None:
     if callback_data.field not in {"show_qualifying", "show_practice"}:
-        await callback.answer("Неизвестная настройка", show_alert=True)
+        user = await db.get_or_create_user(callback.from_user.id)
+        await callback.answer(utils.tr(utils.get_ui_lang(user), "generic.unknown_setting"), show_alert=True)
         return
 
-    user = await db.get_user(callback.from_user.id)
+    user = await db.get_or_create_user(callback.from_user.id)
     new_value = 0 if user.get(callback_data.field, 1) else 1
     await db.update_user(callback.from_user.id, **{callback_data.field: new_value})
 
@@ -348,6 +363,7 @@ async def _toggle_digest_subscription(
             db,
             mem,
             page=callback_data.page,
+            pick_page=callback_data.pick_page,
             scope=callback_data.scope,
             ref_id=callback_data.ref_id,
             action="view",
@@ -360,13 +376,14 @@ async def _toggle_digest_subscription(
             db,
             mem,
             page=callback_data.page,
+            pick_page=callback_data.pick_page,
             scope=callback_data.scope,
             ref_id=callback_data.ref_id,
             action="view",
             chat_id=callback.from_user.id,
             as_edit=True,
         )
-    await callback.answer("Настройка обновлена")
+    await callback.answer(utils.tr(utils.get_ui_lang(user), "digest.setting_updated"))
 
 
 @router.callback_query(utils.DigestViewCD.filter(F.kind == "today"))
@@ -384,6 +401,7 @@ async def cb_today_digest(
         db,
         mem,
         page=callback_data.page,
+        pick_page=callback_data.pick_page,
         scope=callback_data.scope,
         ref_id=callback_data.ref_id,
         action=callback_data.action,
@@ -398,6 +416,7 @@ async def _handle_today(
     db: Database,
     mem: MemoryCache,
     page: int = 0,
+    pick_page: int = 0,
     scope: str = "all",
     ref_id: str = "",
     action: str = "pick",
@@ -430,7 +449,7 @@ async def _handle_today(
     ]
 
     date_label = now_local.strftime("%d %B %Y")
-    header = f"{_TODAY_HEADER} — {date_label}"
+    header = f"{utils.tr(utils.get_ui_lang(user), 'digest.today_header')} — {date_label}"
     await _render_digest(
         target,
         db,
@@ -441,6 +460,7 @@ async def _handle_today(
         subs=subs,
         header=header,
         page=page,
+        pick_page=pick_page,
         scope=scope,
         ref_id=ref_id,
         action=action,
@@ -456,7 +476,8 @@ async def cmd_week(message: Message, db: Database, mem: MemoryCache) -> None:
 
 @router.callback_query(F.data == "week")
 async def cb_week(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
-    await callback.answer("Загружаю...")
+    user = await db.get_or_create_user(callback.from_user.id)
+    await callback.answer(utils.tr(utils.get_ui_lang(user), "digest.loading"))
     await _handle_week(callback.message, db, mem, chat_id=callback.from_user.id, as_edit=True)
 
 
@@ -482,6 +503,7 @@ async def cb_week_digest(
         db,
         mem,
         page=callback_data.page,
+        pick_page=callback_data.pick_page,
         scope=callback_data.scope,
         ref_id=callback_data.ref_id,
         action=callback_data.action,
@@ -496,6 +518,7 @@ async def _handle_week(
     db: Database,
     mem: MemoryCache,
     page: int = 0,
+    pick_page: int = 0,
     scope: str = "all",
     ref_id: str = "",
     action: str = "pick",
@@ -514,7 +537,7 @@ async def _handle_week(
     bc_map   = utils.broadcasts_by_session(all_broadcasts)
     label    = utils.week_label(w_start, w_end)
 
-    header = f"{_WEEK_HEADER} — {label}"
+    header = f"{utils.tr(utils.get_ui_lang(user), 'digest.week_header')} — {label}"
     await _render_digest(
         target,
         db,
@@ -525,6 +548,7 @@ async def _handle_week(
         subs=subs,
         header=header,
         page=page,
+        pick_page=pick_page,
         scope=scope,
         ref_id=ref_id,
         action=action,
@@ -573,14 +597,16 @@ async def cb_history_pick(
 ) -> None:
     subs = await db.get_subscriptions(callback.from_user.id)
     items = [sub for sub in subs if sub["type"] == callback_data.kind]
-    title = "🏎️ <b>Фильтр по серии</b>" if callback_data.kind == "series" else "🏷️ <b>Фильтр по классу</b>"
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    title = utils.tr(lang, "digest.pick_series_title" if callback_data.kind == "series" else "digest.pick_class_title")
     if not items:
-        await callback.answer("Нет подходящих подписок для фильтра.", show_alert=True)
+        await callback.answer(utils.tr(lang, "digest.no_matching_subs"), show_alert=True)
         return
     await callback.message.edit_text(
-        title + "\n\nВыберите фильтр:",
+        title,
         parse_mode="HTML",
-        reply_markup=utils.history_pick_menu(callback_data.kind, items, callback_data.page),
+        reply_markup=utils.history_pick_menu(callback_data.kind, items, callback_data.page, lang=lang),
     )
     await callback.answer()
 
@@ -597,6 +623,7 @@ async def _render_history(
 ) -> None:
     chat_id = chat_id or target.chat.id
     user = await db.get_or_create_user(chat_id)
+    lang = utils.get_ui_lang(user)
     h_start, h_end = utils.history_window()
     series_ids, class_ids = await _subs_ids(db, chat_id)
     subs = await db.get_subscriptions(chat_id)
@@ -609,11 +636,11 @@ async def _render_history(
     bc_map = utils.broadcasts_by_session(all_broadcasts)
     langs = json.loads(user.get("preferred_langs", '["English"]'))
 
-    label = _history_filter_label(filter_type, ref_id, subs)
-    header = f"{_HISTORY_HEADER}\nПериод: последние <b>7 дней</b>\nФильтр: <b>{label}</b>"
-    pages = _history_pages(sessions, bc_map, user["timezone"], langs, header)
+    label = _history_filter_label(filter_type, ref_id, subs, lang)
+    header = f"{utils.tr(lang, 'digest.history_header')}\n{utils.tr(lang, 'digest.history_period')}\n{utils.tr(lang, 'digest.history_filter_label', label=label)}"
+    pages = _history_pages(sessions, bc_map, user["timezone"], langs, header, lang)
     safe_page = max(0, min(page, len(pages) - 1))
-    kb = utils.history_filter_menu(filter_type, ref_id, safe_page, len(pages))
+    kb = utils.history_filter_menu(filter_type, ref_id, safe_page, len(pages), lang=lang)
 
     if as_edit:
         await target.edit_text(

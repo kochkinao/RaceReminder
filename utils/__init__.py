@@ -14,10 +14,12 @@ from .formatters import (
     session_card, build_digest, notification_text,
     fmt_datetime, fmt_time, fmt_duration, is_qualifying, is_practice, session_category,
 )
+from .i18n import UI_EN, UI_RU, UI_LANGUAGE_OPTIONS, bool_text, get_ui_lang, normalize_ui_lang, tr
 from .kb import (
     SubToggleCD, SearchToggleCD, SeriesBrowseCD, SeriesInfoCD, KbShowCD, FavCD, RemindCD, HistoryViewCD, HistoryPickCD, DigestViewCD,
     ProfileToggleCD, LangToggleCD, QualToggleCD, SubNotifyCD,
     main_menu, subs_main, back_to_menu, back_to_subs,
+    ui_language_picker,
     timezone_picker, series_group_label, series_group_to_callback, series_group_from_callback, series_subgroup_label, series_has_subgroups, series_subgroup_menu, series_group_menu, filter_series_by_group, series_list, class_list, week_pager, today_pager,
     profile_menu, lang_picker, kb_menu, session_actions, reminder_menu, digest_pick_menu, digest_view_menu,
     history_filter_menu, history_pick_menu,
@@ -38,9 +40,10 @@ __all__ = [
     "today_window", "week_window", "notify_window", "history_window", "week_label",
     "session_card", "build_digest", "notification_text",
     "fmt_datetime", "fmt_time", "fmt_duration", "is_qualifying", "is_practice", "session_category",
+    "UI_EN", "UI_RU", "UI_LANGUAGE_OPTIONS", "bool_text", "get_ui_lang", "normalize_ui_lang", "tr",
     "SubToggleCD", "SearchToggleCD", "SeriesBrowseCD", "SeriesInfoCD", "KbShowCD", "FavCD", "RemindCD", "HistoryViewCD", "HistoryPickCD", "DigestViewCD",
     "ProfileToggleCD", "LangToggleCD", "QualToggleCD", "SubNotifyCD",
-    "main_menu", "subs_main", "back_to_menu", "back_to_subs",
+    "main_menu", "subs_main", "back_to_menu", "back_to_subs", "ui_language_picker",
     "timezone_picker", "series_group_label", "series_group_to_callback", "series_group_from_callback", "series_subgroup_label", "series_has_subgroups", "series_subgroup_menu", "series_group_menu", "filter_series_by_group", "series_list", "class_list", "week_pager", "today_pager",
     "profile_menu", "lang_picker", "kb_menu", "session_actions", "reminder_menu", "digest_pick_menu", "digest_view_menu",
     "history_filter_menu", "history_pick_menu",

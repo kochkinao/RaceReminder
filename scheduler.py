@@ -361,14 +361,15 @@ async def _session_reminders_job(
             continue
 
         user_langs = json.loads(user.get("preferred_langs", '["English"]'))
+        ui_lang = utils.get_ui_lang(user)
         labels = {
-            "1day": "🔔 Напоминание по сессии: старт через сутки",
-            "1hour": "🚨 Напоминание по сессии: старт через час",
-            "start": "🏁 Напоминание по сессии: старт сейчас",
+            "1day": "🔔 Session reminder: starts in 1 day" if ui_lang == "en" else "🔔 Напоминание по сессии: старт через сутки",
+            "1hour": "🚨 Session reminder: starts in 1 hour" if ui_lang == "en" else "🚨 Напоминание по сессии: старт через час",
+            "start": "🏁 Session reminder: starts now" if ui_lang == "en" else "🏁 Напоминание по сессии: старт сейчас",
         }
         text = (
-            f"{labels.get(row['remind_type'], '🔔 Напоминание по сессии')}\n\n"
-            f"{utils.session_card(session, broadcasts, live_timings, user['timezone'], user_langs) or session.get('name', 'Сессия')}"
+            f"{labels.get(row['remind_type'], '🔔 Session reminder' if ui_lang == 'en' else '🔔 Напоминание по сессии')}\n\n"
+            f"{utils.session_card(session, broadcasts, live_timings, user['timezone'], user_langs, ui_lang=ui_lang) or session.get('name', 'Session' if ui_lang == 'en' else 'Сессия')}"
         )
         dedupe_key = ("session_reminder", row["chat_id"], row["session_id"], row["remind_type"])
         if utils.delivery_queue.has(dedupe_key):
@@ -378,7 +379,7 @@ async def _session_reminders_job(
             chat_id=row["chat_id"],
             text=text,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="📋 Подробнее", callback_data=f"session:{row['session_id']}"),
+                InlineKeyboardButton(text="📋 Details" if ui_lang == "en" else "📋 Подробнее", callback_data=f"session:{row['session_id']}"),
             ]]),
             dedupe_key=dedupe_key,
             session_id=row["session_id"],
@@ -436,6 +437,7 @@ async def _notifications_job(
         series_ids = {s["ref_id"] for s in subs if s["type"] == "series"}
         class_ids  = {s["ref_id"] for s in subs if s["type"] == "vehicle_class"}
         user_langs = json.loads(user.get("preferred_langs", '["English"]'))
+        ui_lang = utils.get_ui_lang(user)
         if _in_quiet_hours(now, user):
             continue
 
@@ -485,10 +487,11 @@ async def _notifications_job(
             user_tz=user["timezone"],
             user_langs=user_langs,
             notif_type=notif_type,
+            ui_lang=ui_lang,
         )
         sid = session.get("id", "")
         kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="📋 Подробнее", callback_data=f"session:{sid}"),
+            InlineKeyboardButton(text="📋 Details" if ui_lang == "en" else "📋 Подробнее", callback_data=f"session:{sid}"),
         ]])
         dedupe_key = ("notification", chat_id, sid, notif_type)
         if utils.delivery_queue.has(dedupe_key):
@@ -561,6 +564,7 @@ async def _weekly_digest_job(
         series_ids = {s["ref_id"] for s in subs if s["type"] == "series"}
         class_ids  = {s["ref_id"] for s in subs if s["type"] == "vehicle_class"}
         user_langs = json.loads(user.get("preferred_langs", '["English"]'))
+        ui_lang = utils.get_ui_lang(user)
 
         sessions = _sessions_for_user(series_ids, class_ids, series_idx, class_idx)
         sessions = [session for session in sessions if _allows_session_type(session, subs)]
@@ -569,17 +573,20 @@ async def _weekly_digest_job(
             s for s in sessions
             if ("digest", s["id"]) not in {(k[2], k[1]) for k in sent_set if k[0] == chat_id}
         ]
-        header = f"📆 <b>Гонки на неделю</b> — {label}"
+        header = f"{'📆 <b>Races This Week</b>' if ui_lang == 'en' else '📆 <b>Гонки на неделю</b>'} — {label}"
         if len(subs) > 1:
             series_count = sum(1 for sub in subs if sub["type"] == "series")
             class_count = sum(1 for sub in subs if sub["type"] == "vehicle_class")
-            messages = [(
-                f"{header}\n\n"
-                f"Найдено <b>{len(new_sessions)}</b> сессий на неделю.\n"
-                f"Подписок: серии — <b>{series_count}</b>, классы — <b>{class_count}</b>.\n\n"
-                f"Выберите серию или класс, чтобы сузить дайджест."
+            messages = [utils.tr(
+                ui_lang,
+                "digest.summary",
+                header=header,
+                count=len(new_sessions),
+                period=utils.tr(ui_lang, "digest.period_week"),
+                series_count=series_count,
+                class_count=class_count,
             )]
-            reply_markup = utils.digest_pick_menu("week", subs, 0)
+            reply_markup = utils.digest_pick_menu("week", subs, 0, lang=ui_lang)
         else:
             messages = utils.build_digest(
                 new_sessions, bc_map, {},
@@ -587,6 +594,7 @@ async def _weekly_digest_job(
                 user_langs=user_langs,
                 show_no_bc=bool(user.get("show_no_broadcast", 1)),
                 header=header,
+                ui_lang=ui_lang,
             )
             reply_markup = utils.digest_view_menu(
                 "week",
@@ -594,6 +602,7 @@ async def _weekly_digest_job(
                 len(messages),
                 selected_sub=subs[0] if subs else None,
                 allow_pick=False,
+                lang=ui_lang,
             )
         dedupe_key = ("digest", chat_id, tuple(sorted(s["id"] for s in new_sessions)))
         if utils.delivery_queue.has(dedupe_key):

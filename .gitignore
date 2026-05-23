@@ -219,11 +219,11 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-*.db
-*.db-shm
-*.db-wal
-data/*.db
-data/*.db-shm
-data/*.db-wal
+raceday.db
+raceday.db-shm
+raceday.db-wal
+data/raceday.db
+data/raceday.db-shm
+data/raceday.db-wal
 
 .jpg

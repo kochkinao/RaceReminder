@@ -1,4 +1,7 @@
+from datetime import date
+
 import utils
+from utils.rscg import RscgStage
 
 
 def _session() -> dict:
@@ -88,3 +91,27 @@ def test_notification_text_uses_label_and_card() -> None:
 
     assert text.startswith("🚨 Через час")
     assert "Grand Prix" in text
+
+
+def test_rscg_notification_text_is_localized_for_english() -> None:
+    stage = RscgStage(
+        id=64,
+        round=1,
+        date_start=date(2026, 5, 15),
+        date_end=date(2026, 5, 17),
+        track="Moscow Raceway",
+        location="Moscow Region",
+        description="Season opener",
+        sprint="Touring classes",
+        endurance=None,
+        additional=None,
+        note=None,
+        image_url=None,
+        ticket_url=None,
+        info_url=None,
+    )
+
+    text = utils.rscg_notification_text(stage, "start", ui_lang="en")
+
+    assert text.startswith("🏁 Starts Today")
+    assert "SMP RSKG — Round 1" in text

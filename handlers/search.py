@@ -59,20 +59,35 @@ def _extract_search_query(text: str | None) -> str | None:
     return query or None
 
 
-def _search_results_text(query: str, series_count: int, class_count: int, lang: str) -> str:
+def _search_results_text(
+    query: str,
+    series_count: int,
+    class_count: int,
+    kb_count: int,
+    lang: str,
+) -> str:
     safe_query = escape(query)
+    if series_count == 0 and class_count == 0 and kb_count > 0:
+        return utils.tr(
+            lang,
+            "search.kb_only_results",
+            query=safe_query,
+            kb_count=kb_count,
+        )
     return utils.tr(
         lang,
         "search.results",
         query=safe_query,
         series_count=series_count,
         class_count=class_count,
+        kb_count=kb_count,
     )
 
 
 def _search_results_keyboard(
     series_matches: list[dict],
     class_matches: list[dict],
+    kb_matches: list[str],
     subscribed_series_ids: set[str],
     subscribed_class_ids: set[str],
     lang: str = utils.UI_RU,
@@ -93,6 +108,12 @@ def _search_results_keyboard(
             callback_data=utils.SearchToggleCD(type="vehicle_class", ref_id=vehicle_class["id"]).pack(),
         )])
 
+    for article_name in kb_matches[:10]:
+        btns.append([InlineKeyboardButton(
+            text=f"📚 {article_name}",
+            callback_data=utils.KbShowCD(name=article_name).pack(),
+        )])
+
     btns.append([InlineKeyboardButton(text=utils.tr(lang, "menu.back_to_menu"), callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
@@ -102,26 +123,30 @@ async def _render_search_results(
     user_id: int,
     db: Database,
     mem: MemoryCache,
+    http_session,
 ) -> tuple[str, InlineKeyboardMarkup] | None:
     resolved_query = _resolve_query(query)
     user = await db.get_or_create_user(user_id)
     lang = utils.get_ui_lang(user)
-    all_series = await utils.get_all_series(mem, db)
-    all_classes = await utils.get_all_vehicle_classes(mem, db)
+    all_series = await utils.get_all_series(mem, db, http_session)
+    all_classes = await utils.get_all_vehicle_classes(mem, db, http_session)
+    all_kb_names = list(utils.KNOWLEDGE_BASE.keys())
 
     series_matches = [s for s in all_series if _search_match(resolved_query, s.get("name", ""))]
     class_matches = [c for c in all_classes if _search_match(resolved_query, c.get("name", ""))]
-    if not series_matches and not class_matches:
+    kb_matches = [name for name in all_kb_names if _search_match(resolved_query, name)]
+    if not series_matches and not class_matches and not kb_matches:
         return None
 
     subs = await db.get_subscriptions(user_id)
     subscribed_series_ids = {s["ref_id"] for s in subs if s["type"] == "series"}
     subscribed_class_ids = {s["ref_id"] for s in subs if s["type"] == "vehicle_class"}
 
-    text = _search_results_text(query, len(series_matches), len(class_matches), lang)
+    text = _search_results_text(query, len(series_matches), len(class_matches), len(kb_matches), lang)
     kb = _search_results_keyboard(
         series_matches,
         class_matches,
+        kb_matches,
         subscribed_series_ids,
         subscribed_class_ids,
         lang,
@@ -140,26 +165,40 @@ async def _build_kb_card(
     name: str,
     db: Database,
     mem: MemoryCache,
+    http_session,
+    source_group: str = "",
+    source_page: int = 0,
 ) -> tuple[str, InlineKeyboardMarkup]:
     user = await db.get_or_create_user(user_id)
     lang = utils.get_ui_lang(user)
-    info = utils.SERIES_KB.get(name)
+    info = utils.KNOWLEDGE_BASE.get(name)
     if not info:
-        raise ValueError(utils.tr(lang, "generic.series_not_found"))
+        raise ValueError(utils.tr(lang, "generic.kb_not_found"))
 
     text    = utils.format_card(name, info, lang=lang)
     similar = info.get("similar", [])
     btns: list[list[InlineKeyboardButton]] = []
 
     similar_row = [
-        InlineKeyboardButton(text=f"→ {s}", callback_data=utils.KbShowCD(name=s).pack())
+        InlineKeyboardButton(
+            text=f"→ {s}",
+            callback_data=utils.KbShowCD(name=s, group=source_group, page=source_page).pack(),
+        )
         for s in similar[:3]
-        if s in utils.SERIES_KB
+        if s in utils.KNOWLEDGE_BASE
     ]
     if similar_row:
         btns.append(similar_row)
 
-    all_series = await utils.get_all_series(mem, db)
+    if name == "SMP RSKG":
+        is_sub = await db.is_subscribed(user_id, "rscg", "rscg")
+        sub_text = utils.tr(lang, "menu.unsubscribe") if is_sub else utils.tr(lang, "menu.subscribe")
+        btns.append([InlineKeyboardButton(
+            text=sub_text,
+            callback_data=utils.RscgCD(action="unsub" if is_sub else "sub").pack(),
+        )])
+
+    all_series = await utils.get_all_series(mem, db, http_session)
     matched = next(
         (s for s in all_series if name.lower() in s.get("name", "").lower()), None
     )
@@ -171,7 +210,12 @@ async def _build_kb_card(
             callback_data=_kb_sub_callback(matched["id"]),
         )])
 
-    btns.append([InlineKeyboardButton(text=utils.tr(lang, "menu.back_to_knowledge_base"), callback_data="kb_menu")])
+    back_callback = "kb_menu"
+    back_text = utils.tr(lang, "menu.back_to_knowledge_base")
+    if source_group:
+        back_callback = utils.KbGroupCD(group=source_group, page=source_page).pack()
+        back_text = utils.tr(lang, "menu.back")
+    btns.append([InlineKeyboardButton(text=back_text, callback_data=back_callback)])
     return text, InlineKeyboardMarkup(inline_keyboard=btns)
 
 
@@ -190,26 +234,26 @@ async def _show_search_prompt(target: Message | CallbackQuery, state: FSMContext
     text = utils.tr(lang, "search.prompt")
     markup = utils.back_to_menu(lang)
     if isinstance(target, CallbackQuery):
-        await target.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        await utils.safe_edit_text(target.message, text, parse_mode="HTML", reply_markup=markup)
     else:
         await target.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
 @router.callback_query(F.data == "search_prompt")
 async def cb_search_menu(callback: CallbackQuery, state: FSMContext, db: Database) -> None:
-    await _show_search_prompt(callback, state, db)
     await callback.answer()
+    await _show_search_prompt(callback, state, db)
 
 
 @router.message(SearchStates.waiting_query, F.text & ~F.text.startswith("/"))
-async def msg_search_query(message: Message, state: FSMContext, db: Database, mem: MemoryCache) -> None:
+async def msg_search_query(message: Message, state: FSMContext, db: Database, mem: MemoryCache, runtime_state) -> None:
     query = message.text.strip()
     if not query:
         return
     await state.clear()
     user = await db.get_or_create_user(message.chat.id, message.from_user.username)
     lang = utils.get_ui_lang(user)
-    rendered = await _render_search_results(query, message.from_user.id, db, mem)
+    rendered = await _render_search_results(query, message.from_user.id, db, mem, runtime_state.http_session)
     if not rendered:
         safe_query = escape(query)
         await message.answer(
@@ -234,30 +278,28 @@ async def cb_search_toggle(
     callback_data: utils.SearchToggleCD,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     query = _extract_search_query(getattr(callback.message, "text", None))
     if not query:
-        user = await db.get_or_create_user(callback.from_user.id)
-        await callback.answer(utils.tr(utils.get_ui_lang(user), "search.refresh_failed"), show_alert=True)
         return
 
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
 
     if callback_data.type == "series":
-        all_series = await utils.get_all_series(mem, db)
+        all_series = await utils.get_all_series(mem, db, runtime_state.http_session)
         item = next((s for s in all_series if s["id"] == callback_data.ref_id), None)
     else:
-        all_classes = await utils.get_all_vehicle_classes(mem, db)
+        all_classes = await utils.get_all_vehicle_classes(mem, db, runtime_state.http_session)
         item = next((c for c in all_classes if c["id"] == callback_data.ref_id), None)
 
     if not item:
-        await callback.answer(utils.tr(lang, "search.item_not_found"), show_alert=True)
         return
 
     if await db.is_subscribed(callback.from_user.id, callback_data.type, callback_data.ref_id):
         await db.remove_subscription(callback.from_user.id, callback_data.type, callback_data.ref_id)
-        notice = f"❌ Отписались: {item['name']}"
     else:
         await db.add_subscription(
             callback.from_user.id,
@@ -265,29 +307,49 @@ async def cb_search_toggle(
             callback_data.ref_id,
             item.get("name", ""),
         )
-        notice = f"✅ Подписались: {item['name']}"
 
-    rendered = await _render_search_results(query, callback.from_user.id, db, mem)
+    rendered = await _render_search_results(query, callback.from_user.id, db, mem, runtime_state.http_session)
     if rendered:
         _, kb = rendered
-        await callback.message.edit_reply_markup(reply_markup=kb)
-
-    await callback.answer(notice)
+        await utils.safe_edit_reply_markup(callback.message, reply_markup=kb)
 
 
 # ── Knowledge base ────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "kb_menu")
 async def cb_kb_menu(callback: CallbackQuery, db: Database) -> None:
+    await callback.answer()
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
-    kb = utils.kb_menu(utils.SERIES_KB, lang)
-    await callback.message.edit_text(
+    kb = utils.kb_menu(utils.KNOWLEDGE_BASE, lang)
+    await utils.safe_edit_text(
+        callback.message,
         utils.tr(lang, "search.kb_title"),
         parse_mode="HTML",
         reply_markup=kb,
     )
+
+
+@router.callback_query(utils.KbGroupCD.filter())
+async def cb_kb_group(
+    callback: CallbackQuery,
+    callback_data: utils.KbGroupCD,
+    db: Database,
+) -> None:
     await callback.answer()
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    await utils.safe_edit_text(
+        callback.message,
+        utils.tr(lang, "search.kb_group_title"),
+        parse_mode="HTML",
+        reply_markup=utils.kb_group_menu(
+            utils.KNOWLEDGE_BASE,
+            callback_data.group,
+            page=callback_data.page,
+            lang=lang,
+        ),
+    )
 
 
 @router.callback_query(utils.KbShowCD.filter())
@@ -296,21 +358,29 @@ async def cb_kb_show(
     callback_data: utils.KbShowCD,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     name = callback_data.name
     user = await db.get_or_create_user(callback.from_user.id)
-    lang = utils.get_ui_lang(user)
-    if name not in utils.SERIES_KB:
-        await callback.answer(utils.tr(lang, "generic.series_not_found"), show_alert=True)
+    if name not in utils.KNOWLEDGE_BASE:
         return
 
-    text, kb = await _build_kb_card(callback.from_user.id, name, db, mem)
-    await callback.message.edit_text(
+    text, kb = await _build_kb_card(
+        callback.from_user.id,
+        name,
+        db,
+        mem,
+        runtime_state.http_session,
+        source_group=callback_data.group,
+        source_page=callback_data.page,
+    )
+    await utils.safe_edit_text(
+        callback.message,
         text,
         parse_mode="HTML",
         reply_markup=kb,
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("kb_sub:"))
@@ -318,25 +388,22 @@ async def cb_kb_sub_toggle(
     callback: CallbackQuery,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     series_id  = callback.data.split(":", 1)[1]
     user = await db.get_or_create_user(callback.from_user.id)
-    lang = utils.get_ui_lang(user)
-    all_series = await utils.get_all_series(mem, db)
+    all_series = await utils.get_all_series(mem, db, runtime_state.http_session)
     series     = next((s for s in all_series if s["id"] == series_id), None)
     if not series:
-        await callback.answer(utils.tr(lang, "generic.series_not_found"))
         return
 
     if await db.is_subscribed(callback.from_user.id, "series", series_id):
         await db.remove_subscription(callback.from_user.id, "series", series_id)
-        notice = f"❌ Отписались: {series['name']}"
     else:
         await db.add_subscription(
             callback.from_user.id, "series", series_id, series.get("name", "")
         )
-        notice = f"✅ Подписались: {series['name']}"
 
-    _, kb = await _build_kb_card(callback.from_user.id, series.get("name", ""), db, mem)
-    await callback.message.edit_reply_markup(reply_markup=kb)
-    await callback.answer(notice)
+    _, kb = await _build_kb_card(callback.from_user.id, series.get("name", ""), db, mem, runtime_state.http_session)
+    await utils.safe_edit_reply_markup(callback.message, reply_markup=kb)

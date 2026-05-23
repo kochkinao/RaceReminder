@@ -17,6 +17,7 @@ Shutdown (Ctrl+C / SIGTERM):
 import asyncio
 import logging
 
+import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
@@ -48,12 +49,14 @@ async def main() -> None:
     mem     = MemoryCache()
     metrics = Metrics()
     state   = utils.RuntimeState()
+    http_session = aiohttp.ClientSession()
+    state.http_session = http_session
 
     await db.connect()
     state.mark_db_connected()
 
     # ── 3. Cache warm-up ──────────────────────────────────────────────────────
-    state.last_warmup_ok = await utils.warm_up(mem, db)
+    state.last_warmup_ok = await utils.warm_up(mem, db, http_session)
 
     # ── 4. Bot + Dispatcher ───────────────────────────────────────────────────
     bot = Bot(
@@ -81,6 +84,7 @@ async def main() -> None:
     dp.include_router(handlers.digest.router)
     dp.include_router(handlers.search.router)
     dp.include_router(handlers.session_details.router)
+    dp.include_router(handlers.rscg.router)
     dp.include_router(handlers.admin.router)
 
     # ── 5. Scheduler ─────────────────────────────────────────────────────────
@@ -103,7 +107,7 @@ async def main() -> None:
 
     # ── 6. Polling ────────────────────────────────────────────────────────────
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types(), runtime_state=state)
     finally:
         scheduler.shutdown(wait=False)
 
@@ -114,6 +118,7 @@ async def main() -> None:
             except Exception:
                 pass
 
+        await http_session.close()
         await bot.session.close()
         await db.close()
 

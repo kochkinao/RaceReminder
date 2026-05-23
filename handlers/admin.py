@@ -41,12 +41,18 @@ def _is_admin(message: Message) -> bool:
     return message.from_user.id in ADMIN_IDS
 
 
-def _user_kb(chat_id: int) -> InlineKeyboardMarkup:
+def _user_kb(chat_id: int, is_active: bool = True) -> InlineKeyboardMarkup:
+    action_btn = (
+        InlineKeyboardButton(text="⛔ Деактивировать", callback_data=f"adm:user_deactivate:{chat_id}")
+        if is_active else
+        InlineKeyboardButton(text="✅ Активировать", callback_data=f"adm:user_activate:{chat_id}")
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🧪 Тест", callback_data=f"adm:user_ping:{chat_id}"),
             InlineKeyboardButton(text="🐞 Debug", callback_data=f"adm:user_debug:{chat_id}"),
         ],
+        [action_btn],
         [InlineKeyboardButton(text="◀️ К пользователям", callback_data="adm:users")],
     ])
 
@@ -62,10 +68,10 @@ def _parse_admin_send_args(text: str) -> tuple[int, str]:
     return chat_id, body
 
 
-async def _render_user_card(chat_id: int, db: Database) -> str | None:
+async def _render_user_card(chat_id: int, db: Database) -> tuple[str, bool] | tuple[None, None]:
     user = await db.get_user(chat_id)
     if not user:
-        return None
+        return None, None
     counts = await db.get_user_counts(chat_id)
     langs = ", ".join(json.loads(user.get("preferred_langs", '["English"]')))
     username = escape(user.get("username") or "—")
@@ -83,7 +89,7 @@ async def _render_user_card(chat_id: int, db: Database) -> str | None:
         f"Избранное: <b>{counts['favorites']}</b>\n"
         f"Персональные reminder'ы: <b>{counts['reminders']}</b>\n"
         f"Отправленных уведомлений: <b>{counts['sent_notifications']}</b>"
-    )
+    ), bool(user["is_active"])
 
 
 async def _render_user_debug(chat_id: int, db: Database) -> str | None:
@@ -142,7 +148,9 @@ def _admin_kb() -> InlineKeyboardMarkup:
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
-async def _dashboard_text(db: Database, mem: MemoryCache, metrics: Metrics) -> str:
+async def _dashboard_text(
+    db: Database, mem: MemoryCache, metrics: Metrics, state: utils.RuntimeState
+) -> str:
     stats = await db.get_stats()
     m     = metrics.summary()
     fallback = utils.fallback_stats()
@@ -155,6 +163,20 @@ async def _dashboard_text(db: Database, mem: MemoryCache, metrics: Metrics) -> s
     top_cmd = "\n".join(
         f"  /{cmd}: {n}" for cmd, n in m["top_commands"][:5]
     ) or "  —"
+    jobs = state.scheduler_jobs
+
+    def _job_line(name: str, label: str) -> str:
+        ts = jobs.get(name)
+        if not ts:
+            return f"  {label}: <i>ещё не запускался</i>"
+        return f"  {label}: <code>{ts[11:16]} UTC</code>"
+
+    scheduler_text = "\n".join([
+        _job_line("cache_warmup", "🗄 Кэш"),
+        _job_line("notifications", "🔔 Уведомления"),
+        _job_line("weekly_digest", "📆 Дайджест"),
+        _job_line("rscg_notifications", "🏎️ РСКГ"),
+    ])
 
     return (
         f"🛠 <b>Панель администратора</b>\n"
@@ -183,28 +205,33 @@ async def _dashboard_text(db: Database, mem: MemoryCache, metrics: Metrics) -> s
         f"  API запросов: {m['api_requests']} | Ошибок: {m['api_errors']}\n"
         f"  Fallback на stale cache: {fallback['count']}\n"
         f"\n"
+        f"<b>⏰ Шедулер (последний запуск)</b>\n"
+        f"{scheduler_text}\n"
+        f"\n"
         f"<b>📬 Retry queue</b>\n"
         f"  В очереди: {utils.delivery_queue.size()}\n"
     )
 
 
 @router.message(Command("admin"))
-async def cmd_admin(message: Message, db: Database, mem: MemoryCache, metrics: Metrics) -> None:
+async def cmd_admin(
+    message: Message, db: Database, mem: MemoryCache, metrics: Metrics, runtime_state: utils.RuntimeState
+) -> None:
     if not _is_admin(message):
         return
-    text = await _dashboard_text(db, mem, metrics)
+    text = await _dashboard_text(db, mem, metrics, runtime_state)
     await message.answer(text, parse_mode="HTML", reply_markup=_admin_kb())
 
 
 @router.callback_query(F.data == "adm:refresh")
 async def cb_refresh(
-    callback: CallbackQuery, db: Database, mem: MemoryCache, metrics: Metrics
+    callback: CallbackQuery, db: Database, mem: MemoryCache, metrics: Metrics, runtime_state: utils.RuntimeState
 ) -> None:
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет доступа")
         return
-    text = await _dashboard_text(db, mem, metrics)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_admin_kb())
+    text = await _dashboard_text(db, mem, metrics, runtime_state)
+    await utils.safe_edit_text(callback.message, text, parse_mode="HTML", reply_markup=_admin_kb())
     await callback.answer("Обновлено")
 
 
@@ -243,6 +270,14 @@ async def cb_users(callback: CallbackQuery, db: Database) -> None:
         f"  {r['created_at'][:16]} — @{escape(r['username'] or str(r['chat_id']))}"
         for r in recent
     ) or "  —"
+    top_subs = await db._fetchall(
+        "SELECT ref_name, type, COUNT(*) n FROM subscriptions "
+        "GROUP BY type, ref_id ORDER BY n DESC LIMIT 5"
+    )
+    top_subs_text = "\n".join(
+        f"  {escape(r['ref_name'])} ({escape(r['type'])}): {r['n']}"
+        for r in top_subs
+    ) or "  —"
 
     text = (
         f"👥 <b>Пользователи</b>\n\n"
@@ -253,8 +288,9 @@ async def cb_users(callback: CallbackQuery, db: Database) -> None:
         f"Новых за неделю: <b>{stats['new_week']}</b>\n\n"
         f"<b>🌍 Топ таймзон:</b>\n{tz_text}\n\n"
         f"<b>🌐 Топ языков:</b>\n{lang_text}\n\n"
+        f"<b>🏁 Топ подписок:</b>\n{top_subs_text}\n\n"
         f"<b>🕐 Последние регистрации:</b>\n{recent_text}\n\n"
-        f"Для детального просмотра используйте <code>/admin_user CHAT_ID</code>."
+        f"Для детального просмотра используйте <code>/admin_user CHAT_ID</code> или <code>/admin_user @username</code>."
     )
     rows = [
         [InlineKeyboardButton(text=f"👤 {r['chat_id']}", callback_data=f"adm:user:{r['chat_id']}")]
@@ -262,7 +298,7 @@ async def cb_users(callback: CallbackQuery, db: Database) -> None:
     ]
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="adm:refresh")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await utils.safe_edit_text(callback.message, text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 
@@ -271,15 +307,27 @@ async def cmd_admin_user(message: Message, db: Database) -> None:
     if not _is_admin(message):
         return
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip().isdigit():
-        await message.answer("Использование: <code>/admin_user CHAT_ID</code>", parse_mode="HTML")
+    if len(parts) < 2:
+        await message.answer(
+            "Использование: <code>/admin_user CHAT_ID</code> или <code>/admin_user @username</code>",
+            parse_mode="HTML",
+        )
         return
-    chat_id = int(parts[1].strip())
-    text = await _render_user_card(chat_id, db)
+    arg = parts[1].strip()
+    if arg.startswith("@") or not arg.isdigit():
+        user_row = await db.get_user_by_username(arg)
+        chat_id = user_row["chat_id"] if user_row else None
+    else:
+        chat_id = int(arg)
+
+    if chat_id is None:
+        await message.answer("Пользователь не найден.")
+        return
+    text, is_active = await _render_user_card(chat_id, db)
     if text is None:
         await message.answer("Пользователь не найден.")
         return
-    await message.answer(text, parse_mode="HTML", reply_markup=_user_kb(chat_id))
+    await message.answer(text, parse_mode="HTML", reply_markup=_user_kb(chat_id, is_active))
 
 
 @router.callback_query(F.data.startswith("adm:user:"))
@@ -288,12 +336,48 @@ async def cb_admin_user(callback: CallbackQuery, db: Database) -> None:
         await callback.answer("Нет доступа")
         return
     chat_id = int(callback.data.rsplit(":", 1)[1])
-    text = await _render_user_card(chat_id, db)
+    text, is_active = await _render_user_card(chat_id, db)
     if text is None:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_user_kb(chat_id))
+    await utils.safe_edit_text(
+        callback.message, text, parse_mode="HTML", reply_markup=_user_kb(chat_id, is_active)
+    )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:user_deactivate:"))
+async def cb_user_deactivate(callback: CallbackQuery, db: Database) -> None:
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа")
+        return
+    chat_id = int(callback.data.rsplit(":", 1)[1])
+    await db.deactivate_user(chat_id)
+    await callback.answer("Пользователь деактивирован", show_alert=True)
+    text, is_active = await _render_user_card(chat_id, db)
+    if text is None:
+        return
+    await utils.safe_edit_text(
+        callback.message, text, parse_mode="HTML", reply_markup=_user_kb(chat_id, is_active)
+    )
+
+
+@router.callback_query(F.data.startswith("adm:user_activate:"))
+async def cb_user_activate(callback: CallbackQuery, db: Database) -> None:
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа")
+        return
+    chat_id = int(callback.data.rsplit(":", 1)[1])
+    await db._execute(
+        "UPDATE users SET is_active=1 WHERE chat_id=?", (chat_id,)
+    )
+    await callback.answer("Пользователь активирован", show_alert=True)
+    text, is_active = await _render_user_card(chat_id, db)
+    if text is None:
+        return
+    await utils.safe_edit_text(
+        callback.message, text, parse_mode="HTML", reply_markup=_user_kb(chat_id, is_active)
+    )
 
 
 @router.callback_query(F.data.startswith("adm:user_debug:"))
@@ -309,7 +393,7 @@ async def cb_admin_user_debug(callback: CallbackQuery, db: Database) -> None:
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="◀️ К пользователю", callback_data=f"adm:user:{chat_id}")
     ]])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await utils.safe_edit_text(callback.message, text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 
@@ -377,7 +461,7 @@ async def cb_metrics(callback: CallbackQuery, metrics: Metrics) -> None:
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="◀️ Назад", callback_data="adm:refresh")
     ]])
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await utils.safe_edit_text(callback.message, text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 
@@ -422,7 +506,8 @@ async def cb_log(callback: CallbackQuery, db: Database) -> None:
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="◀️ Назад", callback_data="adm:refresh")
     ]])
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         "\n".join(lines), parse_mode="HTML", reply_markup=kb
     )
     await callback.answer()
@@ -436,25 +521,32 @@ async def cb_errors(callback: CallbackQuery, metrics: Metrics) -> None:
         await callback.answer("Нет доступа")
         return
 
+    await callback.answer()
+
     errors = list(metrics.recent_errors)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="◀️ Назад", callback_data="adm:refresh")
+    ]])
     if not errors:
-        await callback.answer("Ошибок нет 🎉", show_alert=True)
+        await utils.safe_edit_text(
+            callback.message,
+            "⚠️ <b>Ошибки</b>\n\nОшибок нет\n\n<i>Список сбрасывается при перезапуске бота.</i>",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
         return
 
     lines = ["⚠️ <b>Последние ошибки</b>\n"]
     for e in errors[:15]:
         ts     = e["ts"][11:16]
-        source = e["source"]
-        err    = e["error"][:120]
+        source = escape(e["source"])
+        err    = escape(e["error"][:120])
         lines.append(f"<code>{ts}</code> <b>{source}</b>\n  <i>{err}</i>")
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="◀️ Назад", callback_data="adm:refresh")
-    ]])
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         "\n\n".join(lines), parse_mode="HTML", reply_markup=kb
     )
-    await callback.answer()
 
 
 # ── Cache panel ───────────────────────────────────────────────────────────────
@@ -480,7 +572,8 @@ async def cb_cache(callback: CallbackQuery, mem: MemoryCache, db: Database) -> N
         [InlineKeyboardButton(text="🗑 Очистить L2", callback_data="adm:cache_clear")],
         [InlineKeyboardButton(text="◀️ Назад",       callback_data="adm:refresh")],
     ])
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         "\n".join(lines) or "Кэш пуст",
         parse_mode="HTML",
         reply_markup=kb,
@@ -505,14 +598,14 @@ async def cb_cache_clear(
 
 @router.callback_query(F.data == "adm:warmup")
 async def cb_warmup(
-    callback: CallbackQuery, mem: MemoryCache, db: Database
+    callback: CallbackQuery, mem: MemoryCache, db: Database, runtime_state: utils.RuntimeState
 ) -> None:
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет доступа")
         return
     await callback.answer("⏳ Прогреваю кэш...")
-    await utils.warm_up(mem, db)
-    await callback.answer("✅ Кэш прогрет")
+    await utils.warm_up(mem, db, runtime_state.http_session)
+    await callback.message.answer("✅ Кэш прогрет")
 
 
 # ── Broadcast ─────────────────────────────────────────────────────────────────
@@ -574,7 +667,8 @@ async def cmd_broadcast(message: Message, db: Database, metrics: Metrics) -> Non
                 )
         await asyncio.sleep(TELEGRAM_SEND_DELAY)
 
-    await status_msg.edit_text(
+    await utils.safe_edit_text(
+        status_msg,
         f"📢 <b>Рассылка завершена</b>\n\n"
         f"✅ Отправлено: {sent}\n"
         f"⏳ В очереди на retry: {queued}\n"

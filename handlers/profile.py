@@ -21,7 +21,16 @@ _TOGGLE_FIELDS = {
 }
 
 
-async def _show_profile(target: Message | CallbackQuery, db: Database) -> None:
+def _ui_lang_name(lang_code: str) -> str:
+    return "English" if lang_code == utils.UI_EN else "Русский"
+
+
+async def _show_profile(
+    target: Message | CallbackQuery,
+    db: Database,
+    *,
+    answer_callback: bool = True,
+) -> None:
     chat_id = target.from_user.id
     user = await db.get_or_create_user(chat_id)
     lang = utils.get_ui_lang(user)
@@ -32,6 +41,7 @@ async def _show_profile(target: Message | CallbackQuery, db: Database) -> None:
         f"{utils.tr(
             lang,
             'profile.summary',
+            ui_lang_name=_ui_lang_name(user.get("ui_lang", utils.UI_RU)),
             timezone=user['timezone'],
             langs=', '.join(langs),
             digest_state=utils.bool_text(lang, bool(user['digest_enabled'])),
@@ -45,8 +55,9 @@ async def _show_profile(target: Message | CallbackQuery, db: Database) -> None:
 
     match target:
         case CallbackQuery():
-            await target.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-            await target.answer()
+            await utils.safe_edit_text(target.message, text, parse_mode="HTML", reply_markup=kb)
+            if answer_callback:
+                await target.answer()
         case Message():
             await target.answer(text, parse_mode="HTML", reply_markup=kb)
 
@@ -81,12 +92,34 @@ async def cb_toggle(
 
 # ── Language picker ───────────────────────────────────────────────────────────
 
+@router.callback_query(F.data == "profile:ui_lang")
+async def cb_ui_lang_menu(callback: CallbackQuery, db: Database) -> None:
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    await utils.safe_edit_text(
+        callback.message,
+        utils.tr(lang, "profile.interface_language_title"),
+        parse_mode="HTML",
+        reply_markup=utils.profile_ui_language_picker(user.get("ui_lang", utils.UI_RU), lang),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("profile_ui_lang:"))
+async def cb_set_ui_lang(callback: CallbackQuery, db: Database) -> None:
+    lang = utils.normalize_ui_lang(callback.data.split(":", 1)[1])
+    await db.update_user(callback.from_user.id, ui_lang=lang)
+    await _show_profile(callback, db, answer_callback=False)
+    await callback.answer(utils.tr(lang, "profile.language_updated"))
+
+
 @router.callback_query(F.data == "profile:langs")
 async def cb_langs(callback: CallbackQuery, db: Database) -> None:
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
     current = json.loads(user.get("preferred_langs", '["English"]'))
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         utils.tr(lang, "profile.broadcast_languages_title"),
         parse_mode="HTML",
         reply_markup=utils.lang_picker(current, lang),
@@ -113,7 +146,7 @@ async def cb_toggle_lang(
         current = ["English"]
 
     await db.update_user(callback.from_user.id, preferred_langs=json.dumps(current))
-    await callback.message.edit_reply_markup(reply_markup=utils.lang_picker(current, lang))
+    await utils.safe_edit_reply_markup(callback.message, reply_markup=utils.lang_picker(current, lang))
     await callback.answer()
 
 

@@ -22,49 +22,70 @@ def _reminder_target_ts(session: dict, remind_type: str) -> int | None:
     return start_ts - _REMINDER_OFFSETS[remind_type]
 
 
+async def _load_sessions_index(
+    db: Database,
+    mem: MemoryCache,
+    http_session,
+) -> dict[str, dict]:
+    sessions_by_id: dict[str, dict] = {}
+    for start, end in (
+        utils.history_window(),
+        utils.today_window(),
+        utils.week_window(),
+        utils.notify_window(),
+    ):
+        for session in await utils.get_sessions(mem, db, http_session, start, end):
+            session_id = session.get("id", "")
+            if session_id and session_id not in sessions_by_id:
+                sessions_by_id[session_id] = session
+    return sessions_by_id
+
+
 async def _render_reminder_menu(
     callback: CallbackQuery,
     db: Database,
     mem: MemoryCache,
+    http_session,
     session_id: str,
     notice: str | None = None,
 ) -> None:
-    session, _, _ = await utils.load_session_context(db, mem, session_id)
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    session, _, _ = await utils.load_session_context(db, mem, http_session, session_id)
     if not session:
-        await callback.answer("Сессия не найдена", show_alert=True)
+        await callback.answer(utils.tr(lang, "session.not_found"), show_alert=True)
         return
 
     reminders = await db.get_session_reminders(callback.from_user.id, session_id)
     active_types = {row["remind_type"] for row in reminders}
     start_ts = session.get("start", 0)
-    title = session.get("name", "Сессия")
-    user = await db.get_or_create_user(callback.from_user.id)
-    lang = utils.get_ui_lang(user)
+    title = session.get("name", utils.tr(lang, "generic.session"))
     text = (
         f"{utils.tr(lang, 'session.reminder_title')}\n\n"
         f"<b>{title}</b>\n"
         f"{utils.tr(lang, 'session.start')}: <code>{utils.fmt_datetime(start_ts, user['timezone'], lang)}</code>\n\n"
         f"{utils.tr(lang, 'session.reminder_prompt')}"
     )
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         text,
         parse_mode="HTML",
         reply_markup=utils.reminder_menu(session_id, active_types, lang),
     )
-    await callback.answer(notice or "")
 
 
 async def _render_session(
     callback: CallbackQuery,
     db: Database,
     mem: MemoryCache,
+    http_session,
     session_id: str,
     notice: str | None = None,
 ) -> None:
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
 
-    session, broadcasts, live_timings = await utils.load_session_context(db, mem, session_id)
+    session, broadcasts, live_timings = await utils.load_session_context(db, mem, http_session, session_id)
     if not session:
         await callback.answer(utils.tr(lang, "session.not_found"), show_alert=True)
         return
@@ -81,26 +102,27 @@ async def _render_session(
     ) or utils.tr(lang, "session.no_filtered_data")
 
     is_fav = await db.is_favorite(callback.from_user.id, session_id)
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         card,
         parse_mode="HTML",
         disable_web_page_preview=True,
         reply_markup=utils.session_actions(session_id, is_fav, lang),
     )
-    await callback.answer(notice or "")
 
 
 @router.message(Command("favorites"))
-async def cmd_favorites(message: Message, db: Database, mem: MemoryCache) -> None:
-    await _show_favorites(message, db, mem)
+async def cmd_favorites(message: Message, db: Database, mem: MemoryCache, runtime_state) -> None:
+    await _show_favorites(message, db, mem, runtime_state.http_session)
 
 
 @router.callback_query(F.data == "favorites")
-async def cb_favorites(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
-    await _show_favorites(callback, db, mem)
+async def cb_favorites(callback: CallbackQuery, db: Database, mem: MemoryCache, runtime_state) -> None:
+    await callback.answer()
+    await _show_favorites(callback, db, mem, runtime_state.http_session)
 
 
-async def _show_favorites(target: Message | CallbackQuery, db: Database, mem: MemoryCache) -> None:
+async def _show_favorites(target: Message | CallbackQuery, db: Database, mem: MemoryCache, http_session) -> None:
     chat_id = target.from_user.id if isinstance(target, CallbackQuery) else target.chat.id
     user = await db.get_or_create_user(chat_id, getattr(getattr(target, "from_user", None), "username", None))
     lang = utils.get_ui_lang(user)
@@ -108,16 +130,16 @@ async def _show_favorites(target: Message | CallbackQuery, db: Database, mem: Me
     if not favorites:
         text = utils.tr(lang, "favorites.empty")
         if isinstance(target, CallbackQuery):
-            await target.message.edit_text(text, parse_mode="HTML", reply_markup=utils.back_to_menu(lang))
-            await target.answer()
+            await utils.safe_edit_text(target.message, text, parse_mode="HTML", reply_markup=utils.back_to_menu(lang))
         else:
             await target.answer(text, parse_mode="HTML", reply_markup=utils.back_to_menu(lang))
         return
 
+    sessions_by_id = await _load_sessions_index(db, mem, http_session)
     rows = []
     missing = 0
     for fav in favorites:
-        session, _, _ = await utils.load_session_context(db, mem, fav["session_id"])
+        session = sessions_by_id.get(fav["session_id"])
         if not session:
             missing += 1
             continue
@@ -130,8 +152,7 @@ async def _show_favorites(target: Message | CallbackQuery, db: Database, mem: Me
         text += f"\n\n{utils.tr(lang, 'favorites.missing', count=missing)}"
     markup = InlineKeyboardMarkup(inline_keyboard=rows)
     if isinstance(target, CallbackQuery):
-        await target.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
-        await target.answer()
+        await utils.safe_edit_text(target.message, text, parse_mode="HTML", reply_markup=markup)
     else:
         await target.answer(text, parse_mode="HTML", reply_markup=markup)
 
@@ -141,9 +162,11 @@ async def cb_session_details(
     callback: CallbackQuery,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     session_id = callback.data.split(":", 1)[1]
-    await _render_session(callback, db, mem, session_id)
+    await _render_session(callback, db, mem, runtime_state.http_session, session_id)
 
 
 @router.callback_query(utils.FavCD.filter())
@@ -152,7 +175,9 @@ async def cb_favorite_toggle(
     callback_data: utils.FavCD,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     session_id = callback_data.session_id
     if callback_data.action == "remove":
         await db.remove_favorite(callback.from_user.id, session_id)
@@ -163,7 +188,7 @@ async def cb_favorite_toggle(
         user = await db.get_or_create_user(callback.from_user.id)
         notice = utils.tr(utils.get_ui_lang(user), "session.favorite_added")
 
-    await _render_session(callback, db, mem, session_id, notice=notice)
+    await _render_session(callback, db, mem, runtime_state.http_session, session_id, notice=notice)
 
 
 @router.callback_query(utils.RemindCD.filter())
@@ -172,27 +197,23 @@ async def cb_session_remind(
     callback_data: utils.RemindCD,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     session_id = callback_data.session_id
     if callback_data.action == "menu":
-        await _render_reminder_menu(callback, db, mem, session_id)
+        await _render_reminder_menu(callback, db, mem, runtime_state.http_session, session_id)
         return
 
-    session, _, _ = await utils.load_session_context(db, mem, session_id)
+    session, _, _ = await utils.load_session_context(db, mem, runtime_state.http_session, session_id)
     if not session:
-        user = await db.get_or_create_user(callback.from_user.id)
-        await callback.answer(utils.tr(utils.get_ui_lang(user), "session.not_found"), show_alert=True)
         return
 
     remind_type = callback_data.remind_type
     target_ts = _reminder_target_ts(session, remind_type)
     if target_ts is None:
-        user = await db.get_or_create_user(callback.from_user.id)
-        await callback.answer(utils.tr(utils.get_ui_lang(user), "session.reminder_create_failed"), show_alert=True)
         return
     if target_ts <= int(time.time()):
-        user = await db.get_or_create_user(callback.from_user.id)
-        await callback.answer(utils.tr(utils.get_ui_lang(user), "session.reminder_time_passed"), show_alert=True)
         return
 
     user = await db.get_or_create_user(callback.from_user.id)
@@ -206,11 +227,11 @@ async def cb_session_remind(
     if remind_type in existing:
         await db.remove_session_reminder(callback.from_user.id, session_id, remind_type)
         await _render_reminder_menu(
-            callback, db, mem, session_id, notice=utils.tr(lang, "session.reminder_removed", label=labels[remind_type])
+            callback, db, mem, runtime_state.http_session, session_id, notice=utils.tr(lang, "session.reminder_removed", label=labels[remind_type])
         )
         return
 
     await db.add_session_reminder(callback.from_user.id, session_id, remind_type, target_ts)
     await _render_reminder_menu(
-        callback, db, mem, session_id, notice=utils.tr(lang, "session.reminder_enabled", label=labels[remind_type])
+        callback, db, mem, runtime_state.http_session, session_id, notice=utils.tr(lang, "session.reminder_enabled", label=labels[remind_type])
     )

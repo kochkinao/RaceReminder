@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import aiohttp
+
 from utils.cache import MemoryCache
 from utils.delivery import delivery_queue
 from utils.metrics import Metrics
@@ -48,6 +50,8 @@ class RuntimeState:
     scheduler_started: bool = False
     bot_started: bool = False
     last_warmup_ok: bool = False
+    http_session: aiohttp.ClientSession | None = None
+    scheduler_jobs: dict[str, str] = field(default_factory=dict)
     jobs: dict[str, JobHealth] = field(default_factory=lambda: {
         "cache_warmup": JobHealth(),
         "notifications": JobHealth(),
@@ -55,6 +59,7 @@ class RuntimeState:
         "retry_delivery": JobHealth(),
         "session_reminders": JobHealth(),
         "db_cleanup": JobHealth(),
+        "rscg_notifications": JobHealth(),
     })
 
     def mark_db_connected(self) -> None:
@@ -94,4 +99,3 @@ class RuntimeState:
             "metrics": metrics.summary(),
             "jobs": {name: job.as_dict() for name, job in self.jobs.items()},
         }
-

@@ -415,8 +415,19 @@ async def _fetch_live_timings(
 # ── Two-level cache core ──────────────────────────────────────────────────────
 
 async def _cached(
-    key: str, ttl: int, mem: MemoryCache, db: Database, fetch_fn
+    key: str,
+    ttl: int,
+    mem: MemoryCache,
+    db: Database,
+    http_session_or_fetch_fn,
+    fetch_fn=None,
 ) -> Any:
+    if fetch_fn is None:
+        http_session = None
+        fetch_fn = http_session_or_fetch_fn
+    else:
+        http_session = http_session_or_fetch_fn
+
     if (hit := mem.get(key)) is not None:
         log.debug("L1 hit: %s", key)
         return hit
@@ -428,9 +439,13 @@ async def _cached(
         return data
     log.info("API fetch: %s", key)
     try:
-        async with aiohttp.ClientSession() as http:
-            tok = await _get_token(http)
-            data = await fetch_fn(http, tok)
+        if http_session is not None:
+            tok = await _get_token(http_session)
+            data = await fetch_fn(http_session, tok)
+        else:
+            async with aiohttp.ClientSession() as session:
+                tok = await _get_token(session)
+                data = await fetch_fn(session, tok)
         mem.set(key, data, ttl)
         await db.set_cache(key, json.dumps(data, ensure_ascii=False))
         return data
@@ -450,50 +465,78 @@ async def _cached(
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def get_all_series(
-    mem: MemoryCache, db: Database, year: str = "2026"
+    mem: MemoryCache,
+    db: Database,
+    http_session: aiohttp.ClientSession | None = None,
+    year: str = "2026",
 ) -> list[ApiObject]:
     return await _cached(
-        f"series:{year}", _TTL_SERIES, mem, db,
+        f"series:{year}", _TTL_SERIES, mem, db, http_session,
         lambda h, t: _fetch_series(h, t, year),
     )
 
 
 async def get_all_vehicle_classes(
-    mem: MemoryCache, db: Database
+    mem: MemoryCache,
+    db: Database,
+    http_session: aiohttp.ClientSession | None = None,
 ) -> list[ApiObject]:
     return await _cached(
-        "vehicle_classes", _TTL_CLASSES, mem, db, _fetch_vehicle_classes
+        "vehicle_classes", _TTL_CLASSES, mem, db, http_session, _fetch_vehicle_classes
     )
 
 
 async def get_sessions(
-    mem: MemoryCache, db: Database,
-    window_start: int, window_end: int,
+    mem: MemoryCache,
+    db: Database,
+    *args,
 ) -> list[ApiObject]:
+    if len(args) == 2:
+        http_session = None
+        window_start, window_end = args
+    elif len(args) == 3:
+        http_session, window_start, window_end = args
+    else:
+        raise TypeError("get_sessions() expects (mem, db, start, end) or (mem, db, http_session, start, end)")
     return await _cached(
-        f"sessions:{window_start}:{window_end}", _TTL_SESSIONS, mem, db,
+        f"sessions:{window_start}:{window_end}", _TTL_SESSIONS, mem, db, http_session,
         lambda h, t: _fetch_sessions(h, t, window_start, window_end),
     )
 
 
 async def get_broadcasts(
-    mem: MemoryCache, db: Database, window_start: int,
+    mem: MemoryCache,
+    db: Database,
+    *args,
 ) -> list[ApiObject]:
+    if len(args) == 1:
+        http_session = None
+        (window_start,) = args
+    elif len(args) == 2:
+        http_session, window_start = args
+    else:
+        raise TypeError("get_broadcasts() expects (mem, db, start) or (mem, db, http_session, start)")
     return await _cached(
-        f"broadcasts:{window_start}", _TTL_BCASTS, mem, db,
+        f"broadcasts:{window_start}", _TTL_BCASTS, mem, db, http_session,
         lambda h, t: _fetch_broadcasts(h, t, window_start),
     )
 
 
-async def get_live_timings(session_id: str) -> list[ApiObject]:
-    async with aiohttp.ClientSession() as http:
-        tok = await _get_token(http)
-        return await _fetch_live_timings(http, tok, session_id)
+async def get_live_timings(
+    session_id: str,
+    http_session: aiohttp.ClientSession | None = None,
+) -> list[ApiObject]:
+    if http_session is not None:
+        tok = await _get_token(http_session)
+        return await _fetch_live_timings(http_session, tok, session_id)
+    async with aiohttp.ClientSession() as session:
+        tok = await _get_token(session)
+        return await _fetch_live_timings(session, tok, session_id)
 
 
 # ── Warm-up ───────────────────────────────────────────────────────────────────
 
-async def warm_up(mem: MemoryCache, db: Database) -> bool:
+async def warm_up(mem: MemoryCache, db: Database, http_session: aiohttp.ClientSession) -> bool:
     from utils.windows import today_window, week_window, notify_window
 
     log.info("Cache warm-up started")
@@ -502,13 +545,13 @@ async def warm_up(mem: MemoryCache, db: Database) -> bool:
         w_start, w_end = week_window()
         n_start, n_end = notify_window()
 
-        await get_sessions(mem, db, t_start, t_end)
-        await get_broadcasts(mem, db, t_start)
-        await get_sessions(mem, db, w_start, w_end)
-        await get_broadcasts(mem, db, w_start)
-        await get_sessions(mem, db, n_start, n_end)
-        await get_all_series(mem, db)
-        await get_all_vehicle_classes(mem, db)
+        await get_sessions(mem, db, http_session, t_start, t_end)
+        await get_broadcasts(mem, db, http_session, t_start)
+        await get_sessions(mem, db, http_session, w_start, w_end)
+        await get_broadcasts(mem, db, http_session, w_start)
+        await get_sessions(mem, db, http_session, n_start, n_end)
+        await get_all_series(mem, db, http_session)
+        await get_all_vehicle_classes(mem, db, http_session)
 
         evicted = mem.evict_expired()
         log.info("Cache warm-up done. L1: %d entries (%d evicted)", mem.size(), evicted)

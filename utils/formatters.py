@@ -1,10 +1,12 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from html import escape
 from typing import Any
 
 import pytz
 
 from config import BROADCAST_TYPES
 from utils.i18n import DEFAULT_UI_LANG, tr
+from utils.rscg import RscgStage
 
 type SessionDict   = dict[str, Any]
 type BroadcastDict = dict[str, Any]
@@ -50,6 +52,8 @@ _CATEGORY_LABELS_EN: dict[str, str] = {
 
 _MONTHS_RU = ("янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек")
 _MONTHS_EN = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_MONTHS_RU_FULL = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря")
+_MONTHS_EN_FULL = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
 _DAYS_RU = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 _DAYS_EN = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
@@ -76,6 +80,14 @@ def _month_name(dt: datetime, ui_lang: str) -> str:
 
 def _day_name(dt: datetime, ui_lang: str) -> str:
     return (_DAYS_EN if ui_lang == "en" else _DAYS_RU)[dt.weekday()]
+
+
+def _month_name_date(value: date, ui_lang: str, *, short: bool = False) -> str:
+    if ui_lang == "en":
+        months = _MONTHS_EN if short else _MONTHS_EN_FULL
+    else:
+        months = _MONTHS_RU if short else _MONTHS_RU_FULL
+    return months[value.month - 1]
 
 
 def fmt_datetime(ts: int, tz_name: str, ui_lang: str = DEFAULT_UI_LANG) -> str:
@@ -117,6 +129,22 @@ def _category_label(name: str, ui_lang: str = DEFAULT_UI_LANG) -> str:
 def _local_day_label(ts: int, tz_name: str, ui_lang: str = DEFAULT_UI_LANG) -> str:
     dt = to_local(ts, tz_name)
     return f"{_day_name(dt, ui_lang)}, {dt.day:02d} {_month_name(dt, ui_lang)}"
+
+
+def _format_date_range(start: date, end: date, ui_lang: str = DEFAULT_UI_LANG) -> str:
+    if start == end:
+        return f"{start.day} {_month_name_date(start, ui_lang)} {start.year}"
+    if start.year == end.year and start.month == end.month:
+        return f"{start.day}–{end.day} {_month_name_date(start, ui_lang)} {start.year}"
+    if start.year == end.year:
+        return (
+            f"{start.day} {_month_name_date(start, ui_lang)}"
+            f" – {end.day} {_month_name_date(end, ui_lang)} {end.year}"
+        )
+    return (
+        f"{start.day} {_month_name_date(start, ui_lang)} {start.year}"
+        f" – {end.day} {_month_name_date(end, ui_lang)} {end.year}"
+    )
 
 
 # ── Visual helpers ────────────────────────────────────────────────────────────
@@ -317,4 +345,46 @@ def notification_text(
     }
     label = labels.get(notif_type, "🔔 Reminder" if ui_lang == "en" else "🔔 Напоминание")
     card  = session_card(session, broadcasts, live_timings, user_tz, user_langs, ui_lang=ui_lang) or ""
+    return f"{label}\n\n{card}"
+
+
+def rscg_stage_card(stage: RscgStage, user: dict) -> str:
+    ui_lang = user.get("ui_lang", DEFAULT_UI_LANG)
+    title = "SMP RSKG" if ui_lang == "en" else "СМП РСКГ"
+    lines = [
+        f"🏁 <b>{title} — {'Round' if ui_lang == 'en' else 'Этап'} {stage.round}</b>",
+        f"🕐 {_format_date_range(stage.date_start, stage.date_end, ui_lang)}",
+    ]
+
+    location_parts = [escape(stage.track)]
+    if stage.location:
+        location_parts.append(escape(stage.location))
+    lines.append(f"📍 {', '.join(location_parts)}")
+
+    if stage.description:
+        lines.append(f"📝 {escape(stage.description)}")
+    if stage.sprint:
+        lines.append(f"🏎️ {'Sprint' if ui_lang == 'en' else 'Спринт'}: {escape(stage.sprint)}")
+    if stage.endurance:
+        lines.append(f"⏱️ {'Endurance' if ui_lang == 'en' else 'Эндуранс'}: {escape(stage.endurance)}")
+    if stage.additional:
+        lines.append(f"ℹ️ {escape(stage.additional)}")
+    if stage.note:
+        lines.append(f"⚠️ {escape(stage.note)}")
+
+    return "\n".join(lines)
+
+
+def rscg_notification_text(
+    stage: RscgStage,
+    offset_label: str,
+    ui_lang: str = DEFAULT_UI_LANG,
+) -> str:
+    labels = {
+        "3days": "🔔 In 3 Days" if ui_lang == "en" else "🔔 Через 3 дня",
+        "1day": "🔔 Tomorrow" if ui_lang == "en" else "🔔 Завтра",
+        "start": "🏁 Starts Today" if ui_lang == "en" else "🏁 Сегодня",
+    }
+    label = labels.get(offset_label, "🔔 Reminder" if ui_lang == "en" else "🔔 Напоминание")
+    card = rscg_stage_card(stage, {"ui_lang": ui_lang})
     return f"{label}\n\n{card}"

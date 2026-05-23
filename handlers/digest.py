@@ -14,8 +14,7 @@ log = logging.getLogger(__name__)
 router = Router()
 
 
-async def _subs_ids(db: Database, chat_id: int) -> tuple[set[str], set[str]]:
-    subs = await db.get_subscriptions(chat_id)
+def _subs_ids_from_subs(subs: list[dict]) -> tuple[set[str], set[str]]:
     return (
         {s["ref_id"] for s in subs if s["type"] == "series"},
         {s["ref_id"] for s in subs if s["type"] == "vehicle_class"},
@@ -222,7 +221,8 @@ async def _send_or_edit_digest(
     as_edit: bool,
 ) -> None:
     if as_edit:
-        await target.edit_text(
+        await utils.safe_edit_text(
+            target,
             text,
             parse_mode="HTML",
             disable_web_page_preview=True,
@@ -234,6 +234,21 @@ async def _send_or_edit_digest(
         parse_mode="HTML",
         disable_web_page_preview=True,
         reply_markup=reply_markup,
+    )
+
+
+async def _send_digest_empty_state(
+    target: Message,
+    *,
+    text: str,
+    lang: str,
+    as_edit: bool,
+) -> None:
+    await _send_or_edit_digest(
+        target,
+        text=text,
+        reply_markup=utils.empty_state_menu(lang),
+        as_edit=as_edit,
     )
 
 
@@ -325,21 +340,31 @@ async def _render_digest(
 # ── /today ────────────────────────────────────────────────────────────────────
 
 @router.message(Command("today"))
-async def cmd_today(message: Message, db: Database, mem: MemoryCache) -> None:
-    await _handle_today(message, db, mem)
+async def cmd_today(message: Message, db: Database, mem: MemoryCache, runtime_state) -> None:
+    await _handle_today(message, db, mem, runtime_state.http_session)
 
 @router.callback_query(F.data == "today")
-async def cb_today(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
-    user = await db.get_or_create_user(callback.from_user.id)
-    await callback.answer(utils.tr(utils.get_ui_lang(user), "digest.loading"))
-    await _handle_today(callback.message, db, mem, chat_id=callback.from_user.id, as_edit=True)
+async def cb_today(callback: CallbackQuery, db: Database, mem: MemoryCache, runtime_state) -> None:
+    await callback.answer()
+    await _handle_today(
+        callback.message, db, mem, runtime_state.http_session, chat_id=callback.from_user.id, as_edit=True
+    )
 
 
 @router.callback_query(F.data.startswith("today_page:"))
-async def cb_today_page(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
+async def cb_today_page(callback: CallbackQuery, db: Database, mem: MemoryCache, runtime_state) -> None:
     await callback.answer()
     page = int(callback.data.split(":", 1)[1])
-    await _handle_today(callback.message, db, mem, page=page, action="view", chat_id=callback.from_user.id, as_edit=True)
+    await _handle_today(
+        callback.message,
+        db,
+        mem,
+        runtime_state.http_session,
+        page=page,
+        action="view",
+        chat_id=callback.from_user.id,
+        as_edit=True,
+    )
 
 
 async def _toggle_digest_subscription(
@@ -347,10 +372,9 @@ async def _toggle_digest_subscription(
     callback_data: utils.DigestViewCD,
     db: Database,
     mem: MemoryCache,
+    http_session,
 ) -> None:
     if callback_data.field not in {"show_qualifying", "show_practice"}:
-        user = await db.get_or_create_user(callback.from_user.id)
-        await callback.answer(utils.tr(utils.get_ui_lang(user), "generic.unknown_setting"), show_alert=True)
         return
 
     user = await db.get_or_create_user(callback.from_user.id)
@@ -362,6 +386,7 @@ async def _toggle_digest_subscription(
             callback.message,
             db,
             mem,
+            http_session,
             page=callback_data.page,
             pick_page=callback_data.pick_page,
             scope=callback_data.scope,
@@ -375,6 +400,7 @@ async def _toggle_digest_subscription(
             callback.message,
             db,
             mem,
+            http_session,
             page=callback_data.page,
             pick_page=callback_data.pick_page,
             scope=callback_data.scope,
@@ -383,7 +409,6 @@ async def _toggle_digest_subscription(
             chat_id=callback.from_user.id,
             as_edit=True,
         )
-    await callback.answer(utils.tr(utils.get_ui_lang(user), "digest.setting_updated"))
 
 
 @router.callback_query(utils.DigestViewCD.filter(F.kind == "today"))
@@ -392,14 +417,17 @@ async def cb_today_digest(
     callback_data: utils.DigestViewCD,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     if callback_data.action == "toggle":
-        await _toggle_digest_subscription(callback, callback_data, db, mem)
+        await _toggle_digest_subscription(callback, callback_data, db, mem, runtime_state.http_session)
         return
     await _handle_today(
         callback.message,
         db,
         mem,
+        runtime_state.http_session,
         page=callback_data.page,
         pick_page=callback_data.pick_page,
         scope=callback_data.scope,
@@ -408,13 +436,13 @@ async def cb_today_digest(
         chat_id=callback.from_user.id,
         as_edit=True,
     )
-    await callback.answer()
 
 
 async def _handle_today(
     target: Message,
     db: Database,
     mem: MemoryCache,
+    http_session,
     page: int = 0,
     pick_page: int = 0,
     scope: str = "all",
@@ -427,11 +455,19 @@ async def _handle_today(
     chat_id = chat_id or target.chat.id
     user          = await db.get_or_create_user(chat_id)
     t_start, t_end = utils.today_window()
-    series_ids, class_ids = await _subs_ids(db, chat_id)
     subs = await db.get_subscriptions(chat_id)
+    series_ids, class_ids = _subs_ids_from_subs(subs)
+    if not subs:
+        await _send_digest_empty_state(
+            target,
+            text=utils.tr(utils.get_ui_lang(user), "digest.no_subscriptions_today"),
+            lang=utils.get_ui_lang(user),
+            as_edit=as_edit,
+        )
+        return
 
-    all_sessions   = await utils.get_sessions(mem, db, t_start, t_end)
-    all_broadcasts = await utils.get_broadcasts(mem, db, t_start)
+    all_sessions   = await utils.get_sessions(mem, db, http_session, t_start, t_end)
+    all_broadcasts = await utils.get_broadcasts(mem, db, http_session, t_start)
     sessions = utils.filter_sessions_for_user(all_sessions, series_ids, class_ids)
     bc_map   = utils.broadcasts_by_session(all_broadcasts)
 
@@ -471,21 +507,31 @@ async def _handle_today(
 # ── /week ─────────────────────────────────────────────────────────────────────
 
 @router.message(Command("week"))
-async def cmd_week(message: Message, db: Database, mem: MemoryCache) -> None:
-    await _handle_week(message, db, mem)
+async def cmd_week(message: Message, db: Database, mem: MemoryCache, runtime_state) -> None:
+    await _handle_week(message, db, mem, runtime_state.http_session)
 
 @router.callback_query(F.data == "week")
-async def cb_week(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
-    user = await db.get_or_create_user(callback.from_user.id)
-    await callback.answer(utils.tr(utils.get_ui_lang(user), "digest.loading"))
-    await _handle_week(callback.message, db, mem, chat_id=callback.from_user.id, as_edit=True)
+async def cb_week(callback: CallbackQuery, db: Database, mem: MemoryCache, runtime_state) -> None:
+    await callback.answer()
+    await _handle_week(
+        callback.message, db, mem, runtime_state.http_session, chat_id=callback.from_user.id, as_edit=True
+    )
 
 
 @router.callback_query(F.data.startswith("week_page:"))
-async def cb_week_page(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
+async def cb_week_page(callback: CallbackQuery, db: Database, mem: MemoryCache, runtime_state) -> None:
     await callback.answer()
     page = int(callback.data.split(":", 1)[1])
-    await _handle_week(callback.message, db, mem, page=page, action="view", chat_id=callback.from_user.id, as_edit=True)
+    await _handle_week(
+        callback.message,
+        db,
+        mem,
+        runtime_state.http_session,
+        page=page,
+        action="view",
+        chat_id=callback.from_user.id,
+        as_edit=True,
+    )
 
 
 @router.callback_query(utils.DigestViewCD.filter(F.kind == "week"))
@@ -494,14 +540,17 @@ async def cb_week_digest(
     callback_data: utils.DigestViewCD,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     if callback_data.action == "toggle":
-        await _toggle_digest_subscription(callback, callback_data, db, mem)
+        await _toggle_digest_subscription(callback, callback_data, db, mem, runtime_state.http_session)
         return
     await _handle_week(
         callback.message,
         db,
         mem,
+        runtime_state.http_session,
         page=callback_data.page,
         pick_page=callback_data.pick_page,
         scope=callback_data.scope,
@@ -510,13 +559,13 @@ async def cb_week_digest(
         chat_id=callback.from_user.id,
         as_edit=True,
     )
-    await callback.answer()
 
 
 async def _handle_week(
     target: Message,
     db: Database,
     mem: MemoryCache,
+    http_session,
     page: int = 0,
     pick_page: int = 0,
     scope: str = "all",
@@ -528,11 +577,19 @@ async def _handle_week(
     chat_id = chat_id or target.chat.id
     user = await db.get_or_create_user(chat_id)
     w_start, w_end = utils.week_window()
-    series_ids, class_ids = await _subs_ids(db, chat_id)
     subs = await db.get_subscriptions(chat_id)
+    series_ids, class_ids = _subs_ids_from_subs(subs)
+    if not subs:
+        await _send_digest_empty_state(
+            target,
+            text=utils.tr(utils.get_ui_lang(user), "digest.no_subscriptions_week"),
+            lang=utils.get_ui_lang(user),
+            as_edit=as_edit,
+        )
+        return
 
-    all_sessions   = await utils.get_sessions(mem, db, w_start, w_end)
-    all_broadcasts = await utils.get_broadcasts(mem, db, w_start)
+    all_sessions   = await utils.get_sessions(mem, db, http_session, w_start, w_end)
+    all_broadcasts = await utils.get_broadcasts(mem, db, http_session, w_start)
     sessions = utils.filter_sessions_for_user(all_sessions, series_ids, class_ids)
     bc_map   = utils.broadcasts_by_session(all_broadcasts)
     label    = utils.week_label(w_start, w_end)
@@ -559,14 +616,16 @@ async def _handle_week(
 # ── /history ──────────────────────────────────────────────────────────────────
 
 @router.message(Command("history"))
-async def cmd_history(message: Message, db: Database, mem: MemoryCache) -> None:
-    await _render_history(message, db, mem)
+async def cmd_history(message: Message, db: Database, mem: MemoryCache, runtime_state) -> None:
+    await _render_history(message, db, mem, runtime_state.http_session)
 
 
 @router.callback_query(F.data == "history")
-async def cb_history(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
-    await _render_history(callback.message, db, mem, chat_id=callback.from_user.id, as_edit=True)
+async def cb_history(callback: CallbackQuery, db: Database, mem: MemoryCache, runtime_state) -> None:
     await callback.answer()
+    await _render_history(
+        callback.message, db, mem, runtime_state.http_session, chat_id=callback.from_user.id, as_edit=True
+    )
 
 
 @router.callback_query(utils.HistoryViewCD.filter())
@@ -575,18 +634,20 @@ async def cb_history_view(
     callback_data: utils.HistoryViewCD,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     await _render_history(
         callback.message,
         db,
         mem,
+        runtime_state.http_session,
         filter_type=callback_data.filter_type,
         ref_id=callback_data.ref_id,
         page=callback_data.page,
         chat_id=callback.from_user.id,
         as_edit=True,
     )
-    await callback.answer()
 
 
 @router.callback_query(utils.HistoryPickCD.filter())
@@ -595,26 +656,27 @@ async def cb_history_pick(
     callback_data: utils.HistoryPickCD,
     db: Database,
 ) -> None:
+    await callback.answer()
     subs = await db.get_subscriptions(callback.from_user.id)
     items = [sub for sub in subs if sub["type"] == callback_data.kind]
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
     title = utils.tr(lang, "digest.pick_series_title" if callback_data.kind == "series" else "digest.pick_class_title")
     if not items:
-        await callback.answer(utils.tr(lang, "digest.no_matching_subs"), show_alert=True)
         return
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         title,
         parse_mode="HTML",
         reply_markup=utils.history_pick_menu(callback_data.kind, items, callback_data.page, lang=lang),
     )
-    await callback.answer()
 
 
 async def _render_history(
     target: Message,
     db: Database,
     mem: MemoryCache,
+    http_session,
     filter_type: str = "all",
     ref_id: str = "",
     page: int = 0,
@@ -625,11 +687,26 @@ async def _render_history(
     user = await db.get_or_create_user(chat_id)
     lang = utils.get_ui_lang(user)
     h_start, h_end = utils.history_window()
-    series_ids, class_ids = await _subs_ids(db, chat_id)
     subs = await db.get_subscriptions(chat_id)
+    series_ids, class_ids = _subs_ids_from_subs(subs)
+    if not subs:
+        if as_edit:
+            await utils.safe_edit_text(
+                target,
+                utils.tr(lang, "digest.no_subscriptions_history"),
+                parse_mode="HTML",
+                reply_markup=utils.empty_state_menu(lang),
+            )
+        else:
+            await target.answer(
+                utils.tr(lang, "digest.no_subscriptions_history"),
+                parse_mode="HTML",
+                reply_markup=utils.empty_state_menu(lang),
+            )
+        return
 
-    all_sessions = await utils.get_sessions(mem, db, h_start, h_end)
-    all_broadcasts = await utils.get_broadcasts(mem, db, h_start)
+    all_sessions = await utils.get_sessions(mem, db, http_session, h_start, h_end)
+    all_broadcasts = await utils.get_broadcasts(mem, db, http_session, h_start)
     sessions = utils.filter_sessions_for_user(all_sessions, series_ids, class_ids)
     sessions = sorted(sessions, key=lambda session: session.get("start", 0), reverse=True)
     sessions = _history_filter_sessions(sessions, filter_type, ref_id)
@@ -643,7 +720,8 @@ async def _render_history(
     kb = utils.history_filter_menu(filter_type, ref_id, safe_page, len(pages), lang=lang)
 
     if as_edit:
-        await target.edit_text(
+        await utils.safe_edit_text(
+            target,
             pages[safe_page],
             parse_mode="HTML",
             disable_web_page_preview=True,

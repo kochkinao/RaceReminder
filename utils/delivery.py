@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 from typing import Any, Hashable
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+from aiogram.types import InlineKeyboardMarkup, Message
 
 
 @dataclass(slots=True)
@@ -96,3 +96,64 @@ async def send_delivery(bot: Bot, item: PendingDelivery) -> DeliveryResult:
 
     except Exception as exc:
         return DeliveryResult(status="retry", error=str(exc))
+
+
+def _markup_payload(reply_markup: InlineKeyboardMarkup | None) -> dict[str, Any] | None:
+    if reply_markup is None:
+        return None
+    return reply_markup.model_dump(exclude_none=True)
+
+
+def _message_text(message: Message) -> str | None:
+    return message.text or message.caption
+
+
+def _is_not_modified_error(exc: TelegramBadRequest) -> bool:
+    return "message is not modified" in str(exc).lower()
+
+
+async def safe_edit_text(
+    message: Message,
+    text: str,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    parse_mode: str | None = None,
+    disable_web_page_preview: bool | None = None,
+) -> bool:
+    current_text = _message_text(message)
+    current_markup = _markup_payload(message.reply_markup)
+    next_markup = _markup_payload(reply_markup)
+    if current_text == text and current_markup == next_markup:
+        return False
+
+    try:
+        await message.edit_text(
+            text,
+            parse_mode=parse_mode,
+            disable_web_page_preview=disable_web_page_preview,
+            reply_markup=reply_markup,
+        )
+        return True
+    except TelegramBadRequest as exc:
+        if _is_not_modified_error(exc):
+            return False
+        raise
+
+
+async def safe_edit_reply_markup(
+    message: Message,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    current_markup = _markup_payload(message.reply_markup)
+    next_markup = _markup_payload(reply_markup)
+    if current_markup == next_markup:
+        return False
+
+    try:
+        await message.edit_reply_markup(reply_markup=reply_markup)
+        return True
+    except TelegramBadRequest as exc:
+        if _is_not_modified_error(exc):
+            return False
+        raise

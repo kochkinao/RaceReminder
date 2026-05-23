@@ -14,17 +14,28 @@ log = logging.getLogger(__name__)
 router = Router()
 
 
+def _display_sub_name(sub: dict, lang: str) -> str:
+    if sub.get("type") == "rscg" and sub.get("ref_id") == "rscg":
+        return utils.tr(lang, "rscg.name")
+    return sub.get("ref_name", "")
+
+
 def _sub_kind_label(type_: str) -> str:
     return "series" if type_ == "series" else "vehicle_class"
 
 
 def _notify_text(sub: dict, lang: str) -> str:
-    kind_key = "subscriptions.kind_series" if sub["type"] == "series" else "subscriptions.kind_class"
+    if sub["type"] == "series":
+        kind_key = "subscriptions.kind_series"
+    elif sub["type"] == "vehicle_class":
+        kind_key = "subscriptions.kind_class"
+    else:
+        kind_key = "subscriptions.kind_national"
     return utils.tr(
         lang,
         "subscriptions.notify_card",
         kind=utils.tr(lang, kind_key),
-        name=sub["ref_name"],
+        name=_display_sub_name(sub, lang),
         qual_state=utils.bool_text(lang, bool(sub.get("qualifying_notify", 1))),
         practice_state=utils.bool_text(lang, bool(sub.get("practice_notify", 1))),
     )
@@ -68,65 +79,82 @@ async def cmd_subscriptions(message: Message, db: Database) -> None:
 
 @router.callback_query(F.data == "subs_menu")
 async def cb_subs_menu(callback: CallbackQuery, db: Database) -> None:
+    await callback.answer()
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         utils.tr(lang, "subscriptions.title"), parse_mode="HTML", reply_markup=utils.subs_main(lang)
     )
-    await callback.answer()
 
 
 # ── My subscriptions ──────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "subs:mine")
 async def cb_my_subs(callback: CallbackQuery, db: Database) -> None:
+    await callback.answer()
     subs = await db.get_subscriptions(callback.from_user.id)
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
     if not subs:
-        await callback.answer(utils.tr(lang, "subscriptions.none"), show_alert=True)
         return
 
     series_subs = [s for s in subs if s["type"] == "series"]
     class_subs  = [s for s in subs if s["type"] == "vehicle_class"]
+    rscg_subs   = [s for s in subs if s["type"] == "rscg"]
 
     parts = [utils.tr(lang, "subscriptions.mine") + "\n"]
     
     if series_subs:
         parts.append(utils.tr(lang, "subscriptions.series_label"))
-        parts.extend(f"  • {s['ref_name']}" for s in series_subs)
+        parts.extend(f"  • {_display_sub_name(s, lang)}" for s in series_subs)
     
     if class_subs:
         # Добавляем пустую строку-разделитель только если уже есть серии
         if series_subs:
             parts.append("")  # пустая строка для отступа между блоками
         parts.append(utils.tr(lang, "subscriptions.classes_label"))
-        parts.extend(f"  • {s['ref_name']}" for s in class_subs)
+        parts.extend(f"  • {_display_sub_name(s, lang)}" for s in class_subs)
+
+    if rscg_subs:
+        if series_subs or class_subs:
+            parts.append("")
+        parts.append(utils.tr(lang, "subscriptions.rscg_label"))
+        parts.extend(f"  • {_display_sub_name(s, lang)}" for s in rscg_subs)
     
     # Объединяем через \n – теперь каждый элемент – отдельная строка без лишних \n внутри
     text = "\n".join(parts)
     
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         text, parse_mode="HTML", reply_markup=utils.back_to_subs(lang)
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data == "subs:notify")
 async def cb_subs_notify(callback: CallbackQuery, db: Database) -> None:
-    subs = await db.get_subscriptions(callback.from_user.id)
+    await callback.answer()
+    subs = [
+        sub for sub in await db.get_subscriptions(callback.from_user.id)
+        if sub["type"] in {"series", "vehicle_class"}
+    ]
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
     if not subs:
-        await callback.answer(utils.tr(lang, "subscriptions.none"), show_alert=True)
+        await utils.safe_edit_text(
+            callback.message,
+            utils.tr(lang, "subscriptions.notify_empty"),
+            parse_mode="HTML",
+            reply_markup=utils.back_to_menu(lang),
+        )
         return
 
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         utils.tr(lang, "subscriptions.notify_title"),
         parse_mode="HTML",
         reply_markup=utils.subscriptions_notify_list(subs, lang),
     )
-    await callback.answer()
 
 
 @router.callback_query(utils.SubNotifyCD.filter(F.action == "open"))
@@ -135,6 +163,7 @@ async def cb_sub_notify_open(
     callback_data: utils.SubNotifyCD,
     db: Database,
 ) -> None:
+    await callback.answer()
     subs = await db.get_subscriptions(callback.from_user.id)
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
@@ -146,15 +175,14 @@ async def cb_sub_notify_open(
         None,
     )
     if not sub:
-        await callback.answer(utils.tr(lang, "subscriptions.not_found"), show_alert=True)
         return
 
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         _notify_text(sub, lang),
         parse_mode="HTML",
         reply_markup=utils.subscription_notify_menu(sub, lang),
     )
-    await callback.answer()
 
 
 @router.callback_query(utils.SubNotifyCD.filter(F.action == "toggle"))
@@ -163,9 +191,8 @@ async def cb_sub_notify_toggle(
     callback_data: utils.SubNotifyCD,
     db: Database,
 ) -> None:
+    await callback.answer()
     if callback_data.field not in {"qualifying_notify", "practice_notify"}:
-        user = await db.get_or_create_user(callback.from_user.id)
-        await callback.answer(utils.tr(utils.get_ui_lang(user), "subscriptions.unknown_setting"), show_alert=True)
         return
 
     subs = await db.get_subscriptions(callback.from_user.id)
@@ -179,7 +206,6 @@ async def cb_sub_notify_toggle(
         None,
     )
     if not sub:
-        await callback.answer(utils.tr(lang, "subscriptions.not_found"), show_alert=True)
         return
 
     new_value = 0 if sub.get(callback_data.field, 1) else 1
@@ -195,12 +221,12 @@ async def cb_sub_notify_toggle(
     )
     sub.update(updates)
 
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         _notify_text(sub, lang),
         parse_mode="HTML",
         reply_markup=utils.subscription_notify_menu(sub, lang),
     )
-    await callback.answer(utils.tr(lang, "subscriptions.setting_updated"))
 
 
 # ── Series browser ────────────────────────────────────────────────────────────
@@ -211,18 +237,21 @@ async def cb_series_page(
     callback: CallbackQuery,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
     callback_data: utils.SeriesBrowseCD | None = None,
 ) -> None:
+    await callback.answer()
     group = "menu" if callback_data is None else utils.series_group_from_callback(callback_data.group)
     page = 0 if callback_data is None else callback_data.page
     subgroup = "" if callback_data is None else callback_data.subgroup
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
-    all_series = await utils.get_all_series(mem, db)
+    all_series = await utils.get_all_series(mem, db, runtime_state.http_session)
     subs = await db.get_subscriptions(callback.from_user.id)
     sub_ids = {s["ref_id"] for s in subs if s["type"] == "series"}
     if group == "menu":
-        await callback.message.edit_text(
+        await utils.safe_edit_text(
+            callback.message,
             _series_browser_text(
                 lang=lang,
                 group=group,
@@ -233,11 +262,11 @@ async def cb_series_page(
             parse_mode="HTML",
             reply_markup=utils.series_group_menu(all_series, sub_ids, lang),
         )
-        await callback.answer()
         return
     group_items = utils.filter_series_by_group(all_series, group, sub_ids, subgroup=subgroup)
     if utils.series_has_subgroups(group, group_items, subgroup):
-        await callback.message.edit_text(
+        await utils.safe_edit_text(
+            callback.message,
             _series_browser_text(
                 lang=lang,
                 group=group,
@@ -248,10 +277,10 @@ async def cb_series_page(
             parse_mode="HTML",
             reply_markup=utils.series_subgroup_menu(all_series, group, sub_ids, subgroup=subgroup, lang=lang),
         )
-        await callback.answer()
         return
 
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         _series_browser_text(
             lang=lang,
             group=group,
@@ -262,7 +291,6 @@ async def cb_series_page(
         parse_mode="HTML",
         reply_markup=utils.series_list(all_series, sub_ids, group=group, subgroup=subgroup, page=page, lang=lang),
     )
-    await callback.answer()
 
 
 @router.callback_query(utils.SubToggleCD.filter(F.type == "series"))
@@ -271,28 +299,28 @@ async def cb_toggle_series(
     callback_data: utils.SubToggleCD,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
-    all_series = await utils.get_all_series(mem, db)
+    all_series = await utils.get_all_series(mem, db, runtime_state.http_session)
     s = next((x for x in all_series if x["id"] == callback_data.ref_id), None)
     if not s:
-        await callback.answer(utils.tr(lang, "subscriptions.series_not_found"))
         return
 
     if await db.is_subscribed(callback.from_user.id, "series", callback_data.ref_id):
         await db.remove_subscription(callback.from_user.id, "series", callback_data.ref_id)
-        await callback.answer(f"❌ Отписались: {s['name']}")
     else:
         await db.add_subscription(
             callback.from_user.id, "series", callback_data.ref_id, s.get("name", "")
         )
-        await callback.answer(f"✅ Подписались: {s['name']}")
 
     subs    = await db.get_subscriptions(callback.from_user.id)
     sub_ids = {x["ref_id"] for x in subs if x["type"] == "series"}
     group = utils.series_group_from_callback(callback_data.group)
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         _series_browser_text(
             lang=lang,
             group=group,
@@ -320,14 +348,15 @@ async def cb_series_info(
     callback_data: utils.SeriesInfoCD,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
     series_id  = callback_data.ref_id
-    all_series = await utils.get_all_series(mem, db)
+    all_series = await utils.get_all_series(mem, db, runtime_state.http_session)
     s = next((x for x in all_series if x["id"] == series_id), None)
     if not s:
-        await callback.answer(utils.tr(lang, "subscriptions.series_not_found"))
         return
 
     name = s.get("name", "")
@@ -340,7 +369,7 @@ async def cb_series_info(
         if classes:
             text += f"\n\n🏷️ {classes}"
         if link := s.get("infoLink"):
-            text += f"\n🌐 <a href='{link}'>Официальный сайт</a>"
+            text += f"\n🌐 <a href='{link}'>{utils.tr(lang, 'generic.official_website')}</a>"
 
     is_sub   = await db.is_subscribed(callback.from_user.id, "series", series_id)
     sub_text = utils.tr(lang, "menu.unsubscribe") if is_sub else utils.tr(lang, "menu.subscribe")
@@ -364,28 +393,29 @@ async def cb_series_info(
             ).pack(),
         )],
     ])
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True
     )
-    await callback.answer()
 
 
 # ── Vehicle class browser ─────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "subs:classes")
-async def cb_classes(callback: CallbackQuery, db: Database, mem: MemoryCache) -> None:
+async def cb_classes(callback: CallbackQuery, db: Database, mem: MemoryCache, runtime_state) -> None:
+    await callback.answer()
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
-    all_classes = await utils.get_all_vehicle_classes(mem, db)
+    all_classes = await utils.get_all_vehicle_classes(mem, db, runtime_state.http_session)
     subs        = await db.get_subscriptions(callback.from_user.id)
     sub_ids     = {s["ref_id"] for s in subs if s["type"] == "vehicle_class"}
 
-    await callback.message.edit_text(
+    await utils.safe_edit_text(
+        callback.message,
         utils.tr(lang, "subscriptions.class_screen"),
         parse_mode="HTML",
         reply_markup=utils.class_list(all_classes, sub_ids, lang),
     )
-    await callback.answer()
 
 
 @router.callback_query(utils.SubToggleCD.filter(F.type == "vehicle_class"))
@@ -394,28 +424,25 @@ async def cb_toggle_class(
     callback_data: utils.SubToggleCD,
     db: Database,
     mem: MemoryCache,
+    runtime_state,
 ) -> None:
+    await callback.answer()
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
-    all_classes = await utils.get_all_vehicle_classes(mem, db)
+    all_classes = await utils.get_all_vehicle_classes(mem, db, runtime_state.http_session)
     vc = next((x for x in all_classes if x["id"] == callback_data.ref_id), None)
     if not vc:
-        await callback.answer(utils.tr(lang, "subscriptions.class_not_found"))
         return
 
     if await db.is_subscribed(callback.from_user.id, "vehicle_class", callback_data.ref_id):
         await db.remove_subscription(
             callback.from_user.id, "vehicle_class", callback_data.ref_id
         )
-        await callback.answer(f"❌ {vc['name']}")
     else:
         await db.add_subscription(
             callback.from_user.id, "vehicle_class", callback_data.ref_id, vc.get("name", "")
         )
-        await callback.answer(f"✅ {vc['name']}")
 
     subs    = await db.get_subscriptions(callback.from_user.id)
     sub_ids = {x["ref_id"] for x in subs if x["type"] == "vehicle_class"}
-    await callback.message.edit_reply_markup(
-        reply_markup=utils.class_list(all_classes, sub_ids, lang)
-    )
+    await utils.safe_edit_reply_markup(callback.message, reply_markup=utils.class_list(all_classes, sub_ids, lang))

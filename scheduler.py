@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram import Bot
@@ -43,6 +43,14 @@ Row = dict
 _DIGEST_WINDOW_SECONDS = 5 * 60
 _RETRY_BASE_DELAY_SECONDS = 60
 _RETRY_MAX_ATTEMPTS = 4
+
+
+def _mark_scheduler_job_run(state: RuntimeState, job_name: str) -> None:
+    jobs = getattr(state, "scheduler_jobs", None)
+    if jobs is None:
+        jobs = {}
+        setattr(state, "scheduler_jobs", jobs)
+    jobs[job_name] = datetime.now(timezone.utc).isoformat()
 
 
 def make_scheduler(
@@ -86,6 +94,12 @@ def make_scheduler(
         args=(bot, db, mem, metrics, state),
         trigger="cron", minute="*",
         id="session_reminders", replace_existing=True, **grace,
+    )
+    scheduler.add_job(
+        _rscg_notifications_job,
+        args=(bot, db, mem, metrics, state),
+        trigger="cron", hour="*", minute=10,
+        id="rscg_notifications", replace_existing=True, **grace,
     )
 
     return scheduler
@@ -200,9 +214,10 @@ async def _process_delivery(
 async def _cache_warmup_job(mem: MemoryCache, db: Database, state: RuntimeState) -> None:
     started_at = time.time()
     try:
-        ok = await utils.warm_up(mem, db)
+        ok = await utils.warm_up(mem, db, state.http_session)
         if ok:
             state.mark_job_success("cache_warmup", int((time.time() - started_at) * 1000))
+            _mark_scheduler_job_run(state, "cache_warmup")
             log.info("Cache warm-up done")
         else:
             state.mark_job_failure(
@@ -351,13 +366,25 @@ async def _session_reminders_job(
         return
 
     sent_count = 0
+    users_by_chat_id: dict[int, Row | None] = {}
+    session_context_by_id: dict[str, tuple[Row | None, list[Row], list[Row]]] = {}
     for row in rows:
-        user = await db.get_user(row["chat_id"])
+        chat_id = row["chat_id"]
+        session_id = row["session_id"]
+
+        if chat_id not in users_by_chat_id:
+            users_by_chat_id[chat_id] = await db.get_user(chat_id)
+        user = users_by_chat_id[chat_id]
         if not user:
             continue
-        session, broadcasts, live_timings = await utils.load_session_context(db, mem, row["session_id"])
+
+        if session_id not in session_context_by_id:
+            session_context_by_id[session_id] = await utils.load_session_context(
+                db, mem, state.http_session, session_id
+            )
+        session, broadcasts, live_timings = session_context_by_id[session_id]
         if not session:
-            await db.remove_session_reminder(row["chat_id"], row["session_id"], row["remind_type"])
+            await db.remove_session_reminder(chat_id, session_id, row["remind_type"])
             continue
 
         user_langs = json.loads(user.get("preferred_langs", '["English"]'))
@@ -371,18 +398,18 @@ async def _session_reminders_job(
             f"{labels.get(row['remind_type'], '🔔 Session reminder' if ui_lang == 'en' else '🔔 Напоминание по сессии')}\n\n"
             f"{utils.session_card(session, broadcasts, live_timings, user['timezone'], user_langs, ui_lang=ui_lang) or session.get('name', 'Session' if ui_lang == 'en' else 'Сессия')}"
         )
-        dedupe_key = ("session_reminder", row["chat_id"], row["session_id"], row["remind_type"])
+        dedupe_key = ("session_reminder", chat_id, session_id, row["remind_type"])
         if utils.delivery_queue.has(dedupe_key):
             continue
         item = utils.PendingDelivery(
             kind="session_reminder",
-            chat_id=row["chat_id"],
+            chat_id=chat_id,
             text=text,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="📋 Details" if ui_lang == "en" else "📋 Подробнее", callback_data=f"session:{row['session_id']}"),
+                InlineKeyboardButton(text="📋 Details" if ui_lang == "en" else "📋 Подробнее", callback_data=f"session:{session_id}"),
             ]]),
             dedupe_key=dedupe_key,
-            session_id=row["session_id"],
+            session_id=session_id,
             remind_type=row["remind_type"],
         )
         ok = await _process_delivery(bot, db, metrics, item, allow_queue=True)
@@ -406,8 +433,8 @@ async def _notifications_job(
 
     # ── One API call for everyone ─────────────────────────────────────────────
     try:
-        all_sessions   = await utils.get_sessions(mem, db, n_start, n_end)
-        all_broadcasts = await utils.get_broadcasts(mem, db, n_start)
+        all_sessions   = await utils.get_sessions(mem, db, state.http_session, n_start, n_end)
+        all_broadcasts = await utils.get_broadcasts(mem, db, state.http_session, n_start)
         metrics.api_requests.inc(2)
     except Exception as exc:
         state.mark_job_failure("notifications", str(exc), int((time.time() - t_start) * 1000))
@@ -422,11 +449,12 @@ async def _notifications_job(
     all_users  = await db.get_all_users(active_only=True)
     all_subs   = await db.get_all_subscriptions()
     sent_set   = await db.get_all_sent_notifications()
+    users_by_chat_id = {user["chat_id"]: user for user in all_users}
 
     series_idx, class_idx = _build_session_index(all_sessions)
 
     # ── Accumulate new notifications to batch-write ───────────────────────────
-    to_send: list[tuple[int, Row, str, list, list[str]]] = []
+    to_send: list[tuple[Row, Row, str, list, list[str], str]] = []
 
     for user in all_users:
         chat_id    = user["chat_id"]
@@ -468,15 +496,16 @@ async def _notifications_job(
                 if not user.get("show_no_broadcast", 1) and not bc_map.get(sid):
                     continue
 
-                to_send.append((chat_id, session, notif_type, bc_map.get(sid, []), user_langs))
+                to_send.append((user, session, notif_type, bc_map.get(sid, []), user_langs, ui_lang))
                 sent_set.add(key)  # prevent duplicates within same run
 
     log.info("Notifications to send: %d", len(to_send))
 
     # ── Send with retries / queue fallback ────────────────────────────────────
     sent_count = 0
-    for chat_id, session, notif_type, broadcasts, user_langs in to_send:
-        user = next((u for u in all_users if u["chat_id"] == chat_id), None)
+    for queued_user, session, notif_type, broadcasts, user_langs, ui_lang in to_send:
+        chat_id = queued_user["chat_id"]
+        user = users_by_chat_id.get(chat_id)
         if not user:
             continue
 
@@ -514,10 +543,99 @@ async def _notifications_job(
 
     elapsed = time.time() - t_start
     state.mark_job_success("notifications", int(elapsed * 1000))
+    _mark_scheduler_job_run(state, "notifications")
     log.info(
         "Notification job done in %.2fs — sent %d/%d",
         elapsed, sent_count, len(to_send),
     )
+
+
+def _rscg_start_ts(stage: utils.RscgStage) -> int:
+    moscow_tz = timezone(timedelta(hours=3))
+    start_dt = datetime.combine(stage.date_start, dt_time(hour=10, minute=0), tzinfo=moscow_tz)
+    return int(start_dt.timestamp())
+
+
+async def _rscg_notifications_job(
+    bot: Bot, db: Database, mem: MemoryCache, metrics: Metrics, state: RuntimeState
+) -> None:
+    started_at = time.time()
+    now_ts = int(started_at)
+    allowed_notif_types = ("3days", "1day", "start")
+
+    try:
+        stages = await utils.get_rscg_stages(mem, db, state.http_session)
+    except Exception as exc:
+        state.mark_job_failure("rscg_notifications", str(exc), int((time.time() - started_at) * 1000))
+        log.error("RSCG notifications: fetch failed: %s", exc)
+        metrics.record_error("rscg_notifications", str(exc))
+        return
+
+    if not stages:
+        state.mark_job_success("rscg_notifications", int((time.time() - started_at) * 1000))
+        _mark_scheduler_job_run(state, "rscg_notifications")
+        return
+
+    all_users = await db.get_all_users(active_only=True)
+    all_subs = await db.get_all_subscriptions()
+    sent_set = await db.get_all_sent_notifications()
+    to_send: list[tuple[Row, utils.RscgStage, str]] = []
+
+    for user in all_users:
+        chat_id = user["chat_id"]
+        subs = all_subs.get(chat_id, [])
+        if not any(sub["type"] == "rscg" and sub["ref_id"] == "rscg" for sub in subs):
+            continue
+        if _in_quiet_hours(now_ts, user):
+            continue
+
+        for stage in stages:
+            session_id = f"rscg_{stage.id}"
+            stage_start_ts = _rscg_start_ts(stage)
+            for notif_type in allowed_notif_types:
+                if not user.get(f"notify_{notif_type}", 1 if notif_type == "1day" else 0):
+                    continue
+                key = (chat_id, session_id, notif_type)
+                if key in sent_set:
+                    continue
+                target_ts = stage_start_ts - NOTIFICATION_OFFSETS[notif_type]
+                if abs(now_ts - target_ts) > NOTIFICATION_WINDOW:
+                    continue
+                to_send.append((user, stage, notif_type))
+                sent_set.add(key)
+
+    sent_count = 0
+    for user, stage, notif_type in to_send:
+        chat_id = user["chat_id"]
+        session_id = f"rscg_{stage.id}"
+        ui_lang = utils.get_ui_lang(user)
+        text = utils.rscg_notification_text(stage, notif_type, ui_lang=ui_lang)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="📋 Details" if ui_lang == "en" else "📋 Подробнее",
+                callback_data=utils.RscgCD(action="stage", stage_id=stage.id).pack(),
+            ),
+        ]])
+        dedupe_key = ("notification", chat_id, session_id, notif_type)
+        if utils.delivery_queue.has(dedupe_key):
+            continue
+        item = utils.PendingDelivery(
+            kind="notification",
+            chat_id=chat_id,
+            text=text,
+            reply_markup=kb,
+            dedupe_key=dedupe_key,
+            session_id=session_id,
+            notif_type=notif_type,
+        )
+        ok = await _process_delivery(bot, db, metrics, item, allow_queue=True)
+        if ok:
+            sent_count += 1
+
+    elapsed = time.time() - started_at
+    state.mark_job_success("rscg_notifications", int(elapsed * 1000))
+    _mark_scheduler_job_run(state, "rscg_notifications")
+    log.info("RSCG notifications done in %.2fs — sent %d/%d", elapsed, sent_count, len(to_send))
 
 
 # ── Weekly digest job ─────────────────────────────────────────────────────────
@@ -531,8 +649,8 @@ async def _weekly_digest_job(
     label          = utils.week_label(w_start, w_end)
 
     try:
-        all_sessions   = await utils.get_sessions(mem, db, w_start, w_end)
-        all_broadcasts = await utils.get_broadcasts(mem, db, w_start)
+        all_sessions   = await utils.get_sessions(mem, db, state.http_session, w_start, w_end)
+        all_broadcasts = await utils.get_broadcasts(mem, db, state.http_session, w_start)
         metrics.api_requests.inc(2)
     except Exception as exc:
         state.mark_job_failure("weekly_digest", str(exc), int((time.time() - t_start) * 1000))
@@ -545,6 +663,11 @@ async def _weekly_digest_job(
     all_users  = await db.get_all_users(active_only=True)
     all_subs   = await db.get_all_subscriptions()
     sent_set   = await db.get_all_sent_notifications()
+    sent_digest_by_chat: dict[int, set[str]] = {}
+    for sent_chat_id, session_id, notif_type in sent_set:
+        if notif_type != "digest":
+            continue
+        sent_digest_by_chat.setdefault(sent_chat_id, set()).add(session_id)
 
     series_idx, class_idx = _build_session_index(all_sessions)
 
@@ -568,10 +691,11 @@ async def _weekly_digest_job(
 
         sessions = _sessions_for_user(series_ids, class_ids, series_idx, class_idx)
         sessions = [session for session in sessions if _allows_session_type(session, subs)]
+        sent_digest_ids = sent_digest_by_chat.get(chat_id, set())
 
         new_sessions = [
             s for s in sessions
-            if ("digest", s["id"]) not in {(k[2], k[1]) for k in sent_set if k[0] == chat_id}
+            if s["id"] not in sent_digest_ids
         ]
         header = f"{'📆 <b>Races This Week</b>' if ui_lang == 'en' else '📆 <b>Гонки на неделю</b>'} — {label}"
         if len(subs) > 1:
@@ -621,6 +745,7 @@ async def _weekly_digest_job(
 
     elapsed = time.time() - t_start
     state.mark_job_success("weekly_digest", int(elapsed * 1000))
+    _mark_scheduler_job_run(state, "weekly_digest")
     log.info("Weekly digest done in %.2fs — sent to %d users", elapsed, sent_count)
 
 

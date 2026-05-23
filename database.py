@@ -34,6 +34,7 @@ class Database:
             PRAGMA cache_size     = -8000;
             PRAGMA foreign_keys   = ON;
             PRAGMA temp_store     = MEMORY;
+            PRAGMA mmap_size      = 268435456;
         """)
         await self._create_tables()
         await self._migrate_users_schema()
@@ -189,6 +190,10 @@ class Database:
                 "UPDATE subscriptions SET practice_notify = qual_notify"
             )
 
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_subs_type ON subscriptions(type)"
+        )
+
         await self._db.commit()
 
     # ── Users ─────────────────────────────────────────────────────────────────
@@ -199,6 +204,12 @@ class Database:
 
     async def get_user(self, chat_id: int) -> Row | None:
         return await self._fetchone("SELECT * FROM users WHERE chat_id=?", (chat_id,))
+
+    async def get_user_by_username(self, username: str) -> Row | None:
+        return await self._fetchone(
+            "SELECT * FROM users WHERE lower(username)=lower(?)",
+            (username.lstrip("@"),),
+        )
 
     async def create_user(self, chat_id: int, username: str | None = None) -> Row:
         await self._execute(

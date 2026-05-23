@@ -1,12 +1,20 @@
+from __future__ import annotations
+
 """
 All keyboards live here. Handlers import from utils.kb — no keyboard
 construction logic scattered across handler files.
 """
+from datetime import date
+from typing import TYPE_CHECKING
+
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import DEFAULT_SERIES_NAMES, POPULAR_TIMEZONES
 from utils.i18n import DEFAULT_UI_LANG, UI_LANGUAGE_OPTIONS, tr
+
+if TYPE_CHECKING:
+    from utils.rscg import RscgStage
 
 
 # ── CallbackData factories (TrainingSchedule pattern) ─────────────────────────
@@ -39,6 +47,13 @@ class SeriesInfoCD(CallbackData, prefix="seriesinfo"):
 
 class KbShowCD(CallbackData, prefix="kb"):
     name: str
+    group: str = ""
+    page: int = 0
+
+
+class KbGroupCD(CallbackData, prefix="kbgroup"):
+    group: str
+    page: int = 0
 
 
 class FavCD(CallbackData, prefix="fav"):
@@ -93,6 +108,11 @@ class SubNotifyCD(CallbackData, prefix="subnotify"):
     field: str = ""
 
 
+class RscgCD(CallbackData, prefix="rscg"):
+    action: str
+    stage_id: int = 0
+
+
 # ── Static keyboards ──────────────────────────────────────────────────────────
 
 def ui_language_picker() -> InlineKeyboardMarkup:
@@ -100,6 +120,18 @@ def ui_language_picker() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=label, callback_data=f"ui_lang:{lang}")]
         for label, lang in UI_LANGUAGE_OPTIONS
     ])
+
+
+def profile_ui_language_picker(current: str, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            text=f"{'✅ ' if lang == current else ''}{label}",
+            callback_data=f"profile_ui_lang:{lang}",
+        )]
+        for label, lang in UI_LANGUAGE_OPTIONS
+    ]
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.back"), callback_data="profile_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def main_menu(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
@@ -116,7 +148,10 @@ def main_menu(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=tr(lang, "menu.knowledge_base"), callback_data="kb_menu"),
             InlineKeyboardButton(text=tr(lang, "menu.favorites"), callback_data="favorites"),
         ],
-        [InlineKeyboardButton(text=tr(lang, "menu.profile"), callback_data="profile_menu")],
+        [
+            InlineKeyboardButton(text=tr(lang, "menu.help"), callback_data="help"),
+            InlineKeyboardButton(text=tr(lang, "menu.profile"), callback_data="profile_menu"),
+        ],
     ])
 
 
@@ -124,15 +159,85 @@ def subs_main(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=tr(lang, "menu.series"), callback_data="subs:series")],
         [InlineKeyboardButton(text=tr(lang, "menu.classes"), callback_data="subs:classes")],
+        [InlineKeyboardButton(text=tr(lang, "menu.rscg"), callback_data=RscgCD(action="list").pack())],
         [InlineKeyboardButton(text=tr(lang, "menu.my_subscriptions"), callback_data="subs:mine")],
         [InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")],
     ])
+
+
+def _format_rscg_dates(start: date, end: date, lang: str = DEFAULT_UI_LANG) -> str:
+    months = (
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+        if lang == "en"
+        else ("янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек")
+    )
+    if start == end:
+        return f"{start.day} {months[start.month - 1]}"
+    if start.month == end.month:
+        return f"{start.day}–{end.day} {months[start.month - 1]}"
+    return f"{start.day} {months[start.month - 1]} – {end.day} {months[end.month - 1]}"
+
+
+def rscg_list_kb(
+    stages: list[RscgStage],
+    is_subscribed: bool,
+    lang: str = DEFAULT_UI_LANG,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for stage in stages:
+        rows.append([InlineKeyboardButton(
+            text=(
+                f"Round {stage.round} · {stage.track} · {_format_rscg_dates(stage.date_start, stage.date_end, lang)}"
+                if lang == "en"
+                else f"Этап {stage.round} · {stage.track} · {_format_rscg_dates(stage.date_start, stage.date_end, lang)}"
+            ),
+            callback_data=RscgCD(action="stage", stage_id=stage.id).pack(),
+        )])
+    rows.append([InlineKeyboardButton(
+        text=tr(lang, "menu.unsubscribe") if is_subscribed else tr(lang, "menu.subscribe"),
+        callback_data=RscgCD(action="unsub" if is_subscribed else "sub").pack(),
+    )])
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def rscg_stage_kb(
+    stage: RscgStage,
+    is_subscribed: bool,
+    lang: str = DEFAULT_UI_LANG,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    sub_text = tr(lang, "menu.unsubscribe") if is_subscribed else tr(lang, "menu.subscribe")
+    rows.append([InlineKeyboardButton(
+        text=sub_text,
+        callback_data=RscgCD(action="unsub" if is_subscribed else "sub").pack(),
+    )])
+    link_row: list[InlineKeyboardButton] = []
+    if stage.ticket_url:
+        link_row.append(InlineKeyboardButton(text="🎟 Tickets" if lang == "en" else "🎟 Билеты", url=stage.ticket_url))
+    if stage.info_url:
+        link_row.append(InlineKeyboardButton(text="ℹ️ Details" if lang == "en" else "ℹ️ Подробнее", url=stage.info_url))
+    if link_row:
+        rows.append(link_row)
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.back"), callback_data=RscgCD(action="list").pack())])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def back_to_menu(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")
     ]])
+
+
+def empty_state_menu(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=tr(lang, "menu.subscriptions"), callback_data="subs_menu")],
+        [
+            InlineKeyboardButton(text=tr(lang, "menu.search"), callback_data="search_prompt"),
+            InlineKeyboardButton(text=tr(lang, "menu.help"), callback_data="help"),
+        ],
+        [InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")],
+    ])
 
 
 def back_to_subs(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
@@ -1201,6 +1306,10 @@ def profile_menu(user: dict, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarku
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
+            text=f"{tr(lang, 'menu.language')}: {'Русский' if user.get('ui_lang') == 'ru' else 'English'}",
+            callback_data="profile:ui_lang",
+        )],
+        [InlineKeyboardButton(
             text=f"{tr(lang, 'menu.timezone')}: {user['timezone']}",
             callback_data="profile:tz",
         )],
@@ -1265,13 +1374,66 @@ def lang_picker(current: list[str], lang: str = DEFAULT_UI_LANG) -> InlineKeyboa
 def kb_menu(series_kb: dict, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
     btns = [
         [InlineKeyboardButton(
-            text=f"{info['emoji']} {name}",
-            callback_data=KbShowCD(name=name).pack(),
-        )]
-        for name, info in series_kb.items()
+            text="🏁 Серии" if lang == "ru" else "🏁 Series",
+            callback_data=KbGroupCD(group="series").pack(),
+        )],
+        [InlineKeyboardButton(
+            text="🇷🇺 Национальные серии" if lang == "ru" else "🇷🇺 National Series",
+            callback_data=KbGroupCD(group="national").pack(),
+        )],
+        [InlineKeyboardButton(
+            text="🏷️ Классы и техника" if lang == "ru" else "🏷️ Classes and Cars",
+            callback_data=KbGroupCD(group="classes").pack(),
+        )],
+        [InlineKeyboardButton(
+            text="🧭 Форматы и термины" if lang == "ru" else "🧭 Formats and Terms",
+            callback_data=KbGroupCD(group="formats").pack(),
+        )],
+        [InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")],
     ]
-    btns.append([InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=btns)
+
+
+def kb_group_menu(
+    series_kb: dict,
+    group: str,
+    page: int = 0,
+    page_size: int = 10,
+    lang: str = DEFAULT_UI_LANG,
+) -> InlineKeyboardMarkup:
+    group_titles = {
+        "series": "🏁 Серии" if lang == "ru" else "🏁 Series",
+        "national": "🇷🇺 Национальные серии" if lang == "ru" else "🇷🇺 National Series",
+        "classes": "🏷️ Классы и техника" if lang == "ru" else "🏷️ Classes and Cars",
+        "formats": "🧭 Форматы и термины" if lang == "ru" else "🧭 Formats and Terms",
+    }
+    items = sorted(
+        [(name, info) for name, info in series_kb.items() if str(info.get("group", "series")) == group],
+        key=lambda item: item[0],
+    )
+    chunk = items[page * page_size: (page + 1) * page_size]
+    rows: list[list[InlineKeyboardButton]] = []
+    for name, info in chunk:
+        rows.append([InlineKeyboardButton(
+            text=f"{info['emoji']} {name}",
+            callback_data=KbShowCD(name=name, group=group, page=page).pack(),
+        )])
+
+    total = (len(items) - 1) // page_size + 1 if items else 1
+    if total > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀️", callback_data=KbGroupCD(group=group, page=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total}", callback_data="noop"))
+        if page + 1 < total:
+            nav.append(InlineKeyboardButton(text="▶️", callback_data=KbGroupCD(group=group, page=page + 1).pack()))
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(
+        text=tr(lang, "generic.back_to_sections"),
+        callback_data="kb_menu",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def subscriptions_notify_list(subs: list[dict], lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:

@@ -1314,24 +1314,21 @@ def profile_menu(user: dict, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarku
         [InlineKeyboardButton(
             text=f"{tr(lang, 'menu.language')}: {'Русский' if user.get('ui_lang') == 'ru' else 'English'}",
             callback_data="profile:ui_lang",
-        )],
+        ), InlineKeyboardButton(text=tr(lang, "menu.broadcast_languages"), callback_data="profile:langs")],
         [InlineKeyboardButton(
             text=f"{tr(lang, 'menu.timezone')}: {user['timezone']}",
             callback_data="profile:tz",
         )],
-        [InlineKeyboardButton(text=tr(lang, "menu.broadcast_languages"), callback_data="profile:langs")],
         [InlineKeyboardButton(
             text=f"{icon('digest_enabled')} {tr(lang, 'menu.monday_digest')} ({user['digest_time']})",
             callback_data=tog("digest_enabled"),
         )],
         [InlineKeyboardButton(
-            text=f"{icon('show_no_broadcast')} {tr(lang, 'menu.without_broadcasts')}",
-            callback_data=tog("show_no_broadcast"),
-        )],
-        [InlineKeyboardButton(
             text=f"{icon('quiet_enabled')} {tr(lang, 'menu.quiet_hours_state')} ({user['quiet_start']}:00–{user['quiet_end']}:00)",
             callback_data=tog("quiet_enabled"),
         )],
+        [InlineKeyboardButton(text=tr(lang, "menu.digest_time"), callback_data="profile:digest_time"), InlineKeyboardButton(text=tr(lang, "menu.quiet_hours"), callback_data="profile:quiet_hours")],
+        [InlineKeyboardButton(text=tr(lang, "menu.notification_details"), callback_data="subs:notify")],
         [
             InlineKeyboardButton(text=f"{icon('notify_3days')} {'За 3 дня' if lang == 'ru' else '3 Days Before'}", callback_data=tog("notify_3days")),
             InlineKeyboardButton(text=f"{icon('notify_1day')} {tr(lang, 'menu.remind_1day')}",  callback_data=tog("notify_1day")),
@@ -1340,9 +1337,10 @@ def profile_menu(user: dict, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarku
             InlineKeyboardButton(text=f"{icon('notify_1hour')} {tr(lang, 'menu.remind_1hour')}", callback_data=tog("notify_1hour")),
             InlineKeyboardButton(text=f"{icon('notify_start')} {'Старт' if lang == 'ru' else 'Start'}", callback_data=tog("notify_start")),
         ],
-        [InlineKeyboardButton(text=tr(lang, "menu.notification_details"), callback_data="subs:notify")],
-        [InlineKeyboardButton(text=tr(lang, "menu.digest_time"), callback_data="profile:digest_time")],
-        [InlineKeyboardButton(text=tr(lang, "menu.quiet_hours"), callback_data="profile:quiet_hours")],
+        [InlineKeyboardButton(
+            text=f"{icon('show_no_broadcast')} {tr(lang, 'menu.without_broadcasts')}",
+            callback_data=tog("show_no_broadcast"),
+        )],
         [InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")],
     ])
 

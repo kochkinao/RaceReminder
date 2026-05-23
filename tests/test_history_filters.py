@@ -1,4 +1,8 @@
+from datetime import date
+from types import SimpleNamespace
+
 from handlers import digest
+from utils.rscg import RscgStage
 import utils
 
 
@@ -137,10 +141,15 @@ def test_digest_pick_menu_passes_origin_page_into_view_callbacks() -> None:
         {"type": "vehicle_class", "ref_id": f"class-{idx:08d}", "ref_name": f"Class {idx}"}
         for idx in range(1, 10)
     ]
+    counts = {
+        ("vehicle_class", "class-00000001"): 3,
+        ("vehicle_class", "class-00000002"): 1,
+    }
     kb = utils.digest_pick_menu(
         "today",
         subs,
-        page=1,
+        counts,
+        page=0,
     )
 
     assert kb.inline_keyboard[0][0].callback_data == utils.DigestViewCD(
@@ -148,7 +157,7 @@ def test_digest_pick_menu_passes_origin_page_into_view_callbacks() -> None:
         action="view",
         scope="all",
         page=0,
-        pick_page=1,
+        pick_page=0,
     ).pack()
     assert kb.inline_keyboard[1][0].callback_data == utils.DigestViewCD(
         kind="today",
@@ -156,5 +165,72 @@ def test_digest_pick_menu_passes_origin_page_into_view_callbacks() -> None:
         scope="vehicle_class",
         ref_id="class-00",
         page=0,
-        pick_page=1,
+        pick_page=0,
     ).pack()
+    assert kb.inline_keyboard[1][0].text.endswith("· 3")
+
+
+def test_history_pick_menu_uses_counts() -> None:
+    items = [
+        {"type": "series", "ref_id": "series-1", "ref_name": "Series 1"},
+        {"type": "series", "ref_id": "series-2", "ref_name": "Series 2"},
+    ]
+    counts = {
+        ("series", "series-1"): 4,
+    }
+
+    kb = utils.history_pick_menu("series", items, counts, page=0)
+
+    assert kb.inline_keyboard[0][0].text.endswith("· 4")
+
+
+async def test_render_digest_uses_rscg_stages_for_rscg_subscription(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_safe_edit_text(message, text, **kwargs):
+        captured["text"] = text
+        captured["reply_markup"] = kwargs.get("reply_markup")
+
+    async def fake_rscg_stages(*_args, **_kwargs):
+        return [
+            RscgStage(
+                id=64,
+                round=1,
+                date_start=date.today(),
+                date_end=date.today(),
+                track="Moscow Raceway",
+                location="Moscow Region",
+                description="Season opener",
+                sprint="Touring classes",
+                endurance=None,
+                additional=None,
+                note=None,
+                image_url=None,
+                ticket_url=None,
+                info_url=None,
+            )
+        ]
+
+    monkeypatch.setattr(digest.utils, "safe_edit_text", fake_safe_edit_text)
+    monkeypatch.setattr(digest, "_rscg_digest_stages", fake_rscg_stages)
+
+    target = SimpleNamespace(chat=SimpleNamespace(id=1))
+    await digest._render_digest(
+        target,
+        db=SimpleNamespace(),
+        mem=SimpleNamespace(),
+        http_session=None,
+        kind="today",
+        sessions=[],
+        bc_map={},
+        user={"timezone": "Europe/Moscow", "preferred_langs": '["English"]', "ui_lang": "en"},
+        subs=[{"type": "rscg", "ref_id": "rscg", "ref_name": "SMP RSKG"}],
+        header="📅 <b>My Racing Day</b>",
+        scope="rscg",
+        ref_id="rscg",
+        action="view",
+        as_edit=True,
+    )
+
+    assert "Moscow Raceway" in str(captured["text"])
+    assert "SMP RSKG" in str(captured["text"])

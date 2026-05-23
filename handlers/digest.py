@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import date, datetime, timedelta, timezone
 
 import pytz
 from aiogram import F, Router
@@ -75,6 +76,8 @@ def _filter_digest_sessions(
 
 
 def _resolve_subscription(subs: list[dict], scope: str, ref_id: str) -> dict | None:
+    if scope == "rscg":
+        return next((sub for sub in subs if sub["type"] == "rscg"), None)
     if scope not in {"series", "vehicle_class"} or not ref_id:
         return None
     return next(
@@ -111,7 +114,98 @@ def _selected_digest_header(header: str, sub: dict | None, lang: str) -> str:
     if not sub:
         return header
     prefix = "🏎️" if sub["type"] == "series" else "🏷️"
-    return f"{header}\n{utils.tr(lang, 'digest.filter')}: {prefix} <b>{sub['ref_name']}</b>"
+    name = utils.tr(lang, "rscg.name") if sub["type"] == "rscg" else sub["ref_name"]
+    return f"{header}\n{utils.tr(lang, 'digest.filter')}: {prefix} <b>{name}</b>"
+
+
+def _digest_subscription_counts(
+    sessions: list[dict],
+    subs: list[dict],
+    user: dict,
+) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for session in _filter_digest_sessions(sessions, subs, user):
+        matched = _matched_subscriptions(session, subs)
+        if not matched or not _allows_session_type(session, matched):
+            continue
+        seen: set[tuple[str, str]] = set()
+        for sub in matched:
+            key = (sub["type"], sub["ref_id"])
+            if key in seen:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            seen.add(key)
+    return counts
+
+
+def _digest_window_dates(kind: str, user: dict) -> tuple[date, date]:
+    tz = pytz.timezone(user["timezone"])
+    today = datetime.now(tz).date()
+    if kind == "today":
+        return today, today
+    week_start = today - timedelta(days=today.weekday())
+    return week_start, week_start + timedelta(days=6)
+
+
+async def _rscg_digest_stages(
+    *,
+    kind: str,
+    user: dict,
+    db: Database,
+    mem: MemoryCache,
+    http_session,
+) -> list[utils.RscgStage]:
+    start_date, end_date = _digest_window_dates(kind, user)
+    stages = await utils.get_rscg_stages(mem, db, http_session)
+    return [
+        stage
+        for stage in stages
+        if stage.date_start <= end_date and stage.date_end >= start_date
+    ]
+
+
+def _rscg_digest_pages(stages: list[utils.RscgStage], header: str, user: dict) -> list[str]:
+    pages: list[str] = []
+    current = header + "\n" if header else ""
+    for stage in stages:
+        card = utils.rscg_stage_card(stage, user)
+        entry = "\n" + "─" * 30 + "\n" + card
+        if len(current) + len(entry) > 3800:
+            pages.append(current)
+            current = header + entry
+        else:
+            current += entry
+    if current.strip():
+        pages.append(current)
+    if not pages:
+        pages.append((header + "\n\n" if header else "") + utils.tr(utils.get_ui_lang(user), "digest.no_rscg_results"))
+    return pages
+
+
+def _history_subscription_counts(
+    sessions: list[dict],
+    items: list[dict],
+    kind: str,
+) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    item_ids = {item["ref_id"] for item in items}
+    if kind == "series":
+        for session in sessions:
+            series_ids = {series.get("id") for series in session.get("series", [])}
+            for ref_id in series_ids & item_ids:
+                key = ("series", ref_id)
+                counts[key] = counts.get(key, 0) + 1
+    else:
+        for session in sessions:
+            class_ids = {
+                vehicle_class.get("id")
+                for series in session.get("series", [])
+                for vehicle_class in series.get("vehicleClasses", [])
+            }
+            for ref_id in class_ids & item_ids:
+                key = ("vehicle_class", ref_id)
+                counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def _is_empty_digest(messages: list[str], header: str, lang: str) -> bool:
@@ -255,6 +349,8 @@ async def _send_digest_empty_state(
 async def _render_digest(
     target: Message,
     db: Database,
+    mem: MemoryCache,
+    http_session,
     *,
     kind: str,
     sessions: list[dict],
@@ -276,14 +372,59 @@ async def _render_digest(
     if len(subs) <= 1 and not selected_sub and subs:
         selected_sub = subs[0]
 
-    filtered_sessions = _filter_digest_sessions(sessions, subs, user, selected_sub if scope != "all" or len(subs) <= 1 else None)
     view_header = _selected_digest_header(header, selected_sub if scope != "all" or len(subs) <= 1 else None, ui_lang)
+    subscription_counts = _digest_subscription_counts(sessions, subs, user)
+    rscg_stages: list[utils.RscgStage] | None = None
+    if any(sub["type"] == "rscg" for sub in subs):
+        rscg_stages = await _rscg_digest_stages(
+            kind=kind,
+            user=user,
+            db=db,
+            mem=mem,
+            http_session=http_session,
+        )
+        subscription_counts[("rscg", "rscg")] = len(rscg_stages)
+
+    if selected_sub and selected_sub["type"] == "rscg" and action != "pick":
+        stages = rscg_stages if rscg_stages is not None else await _rscg_digest_stages(
+            kind=kind,
+            user=user,
+            db=db,
+            mem=mem,
+            http_session=http_session,
+        )
+        pages = _rscg_digest_pages(stages, view_header, user)
+        safe_page = max(0, min(page, len(pages) - 1))
+        kb = utils.digest_view_menu(
+            kind,
+            safe_page,
+            len(pages),
+            selected_sub=selected_sub,
+            user=None,
+            pick_page=pick_page,
+            allow_pick=len(subs) > 1,
+            lang=ui_lang,
+        )
+        await _send_or_edit_digest(
+            target,
+            text=pages[safe_page],
+            reply_markup=kb,
+            as_edit=as_edit,
+        )
+        return
+
+    filtered_sessions = _filter_digest_sessions(
+        sessions,
+        subs,
+        user,
+        selected_sub if scope != "all" or len(subs) <= 1 else None,
+    )
 
     if action == "pick" and len(subs) > 1:
         await _send_or_edit_digest(
             target,
             text=_digest_summary_text(kind, header, filtered_sessions, subs, ui_lang),
-            reply_markup=utils.digest_pick_menu(kind, subs, page, lang=ui_lang),
+            reply_markup=utils.digest_pick_menu(kind, subs, subscription_counts, page, lang=ui_lang),
             as_edit=as_edit,
         )
         return
@@ -489,6 +630,8 @@ async def _handle_today(
     await _render_digest(
         target,
         db,
+        mem,
+        http_session,
         kind="today",
         sessions=sessions,
         bc_map=bc_map,
@@ -598,6 +741,8 @@ async def _handle_week(
     await _render_digest(
         target,
         db,
+        mem,
+        http_session,
         kind="week",
         sessions=sessions,
         bc_map=bc_map,
@@ -655,6 +800,8 @@ async def cb_history_pick(
     callback: CallbackQuery,
     callback_data: utils.HistoryPickCD,
     db: Database,
+    mem: MemoryCache,
+    runtime_state,
 ) -> None:
     await callback.answer()
     subs = await db.get_subscriptions(callback.from_user.id)
@@ -664,11 +811,14 @@ async def cb_history_pick(
     title = utils.tr(lang, "digest.pick_series_title" if callback_data.kind == "series" else "digest.pick_class_title")
     if not items:
         return
+    h_start, h_end = utils.history_window()
+    sessions = await utils.get_sessions(mem, db, runtime_state.http_session, h_start, h_end)
+    counts = _history_subscription_counts(sessions, items, callback_data.kind)
     await utils.safe_edit_text(
         callback.message,
         title,
         parse_mode="HTML",
-        reply_markup=utils.history_pick_menu(callback_data.kind, items, callback_data.page, lang=lang),
+        reply_markup=utils.history_pick_menu(callback_data.kind, items, counts, callback_data.page, lang=lang),
     )
 
 

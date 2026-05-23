@@ -182,6 +182,10 @@ _TEXTS: dict[str, dict[str, str]] = {
     "digest.loading": {UI_RU: "Загружаю...", UI_EN: "Loading..."},
     "digest.setting_updated": {UI_RU: "Настройка обновлена", UI_EN: "Setting updated"},
     "digest.no_filter_results": {UI_RU: "😴 Ничего не найдено по выбранному фильтру.", UI_EN: "😴 Nothing matched the selected filter."},
+    "digest.no_rscg_results": {
+        UI_RU: "😴 Нет этапов СМП РСКГ на выбранный период.",
+        UI_EN: "😴 No SMP RSKG rounds were found for the selected period.",
+    },
     "digest.no_subscriptions_today": {
         UI_RU: "📅 <b>Мой гоночный день</b>\n\nУ вас пока нет подписок, поэтому мне нечего показывать на сегодня.\n\nДобавьте серии, классы или СМП РСКГ, и здесь появятся ближайшие события.",
         UI_EN: "📅 <b>My Racing Day</b>\n\nYou do not have any subscriptions yet, so there is nothing to show for today.\n\nAdd series, classes, or SMP RSKG and upcoming events will appear here.",

@@ -1144,6 +1144,7 @@ def history_filter_menu(
 def history_pick_menu(
     kind: str,
     items: list[dict],
+    counts: dict[tuple[str, str], int] | None = None,
     page: int = 0,
     page_size: int = 8,
     lang: str = DEFAULT_UI_LANG,
@@ -1152,8 +1153,10 @@ def history_pick_menu(
     rows = []
     filter_type = "series" if kind == "series" else "vehicle_class"
     for item in chunk:
+        count = counts.get((filter_type, item["ref_id"]), 0) if counts else 0
+        count_text = f" · {count}" if count else ""
         rows.append([InlineKeyboardButton(
-            text=item.get("ref_name", item.get("name", "?"))[:48],
+            text=f"{item.get('ref_name', item.get('name', '?'))[:48]}{count_text}",
             callback_data=HistoryViewCD(
                 filter_type=filter_type,
                 ref_id=item["ref_id"],
@@ -1178,6 +1181,7 @@ def history_pick_menu(
 def digest_pick_menu(
     kind: str,
     subs: list[dict],
+    counts: dict[tuple[str, str], int] | None = None,
     page: int = 0,
     page_size: int = 8,
     lang: str = DEFAULT_UI_LANG,
@@ -1189,8 +1193,10 @@ def digest_pick_menu(
     )]]
     for sub in chunk:
         kind_icon = "🏎️" if sub["type"] == "series" else "🏷️"
+        count = counts.get((sub["type"], sub["ref_id"]), 0) if counts else 0
+        count_text = f" · {count}" if count else ""
         rows.append([InlineKeyboardButton(
-            text=f"{kind_icon} {sub['ref_name'][:42]}",
+            text=f"{kind_icon} {sub['ref_name'][:42]}{count_text}",
             callback_data=DigestViewCD(
                 kind=kind,
                 action="view",
@@ -1261,7 +1267,7 @@ def digest_view_menu(
             ))
         rows.append(nav)
 
-    if user:
+    if user and not (selected_sub and selected_sub.get("type") == "rscg"):
         rows.append([
             InlineKeyboardButton(
                 text=f"{'✅' if user.get('show_qualifying', 1) else '❌'} {tr(lang, 'menu.qualifying')}",

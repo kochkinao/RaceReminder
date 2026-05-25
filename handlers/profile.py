@@ -173,25 +173,30 @@ async def cb_set_tz(callback: CallbackQuery, state: FSMContext, db: Database) ->
         await callback.answer()
         return
     await db.update_user(callback.from_user.id, timezone=tz)
+    await state.clear()
     await callback.answer(f"✅ {tz}")
     await _show_profile(callback, db)
 
 
 @router.message(ProfileStates.editing_timezone_manual)
 async def msg_tz_manual(message: Message, state: FSMContext, db: Database) -> None:
-    import pytz
     user = await db.get_or_create_user(message.chat.id, message.from_user.username)
     lang = utils.get_ui_lang(user)
     tz_input = message.text.strip()
-    try:
-        pytz.timezone(tz_input)
-    except Exception:
+    matches = utils.resolve_timezone_input(tz_input)
+    if not matches:
         await message.answer(utils.tr(lang, "profile.invalid_timezone"))
         return
-    await db.update_user(message.chat.id, timezone=tz_input)
+    if len(matches) > 1:
+        await message.answer(
+            utils.tr(lang, "profile.ambiguous_timezone"),
+            reply_markup=utils.timezone_matches_picker(matches, lang=lang),
+        )
+        return
+    await db.update_user(message.chat.id, timezone=matches[0])
     await state.clear()
     await message.answer(
-        utils.tr(lang, "profile.timezone_updated", value=escape(tz_input)),
+        utils.tr(lang, "profile.timezone_updated", value=escape(matches[0])),
         parse_mode="HTML",
     )
     await _show_profile(message, db)

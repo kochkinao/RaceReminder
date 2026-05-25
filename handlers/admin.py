@@ -15,17 +15,20 @@ import logging
 import time
 from datetime import datetime, timezone
 from html import escape
+from pathlib import Path
+import zipfile
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
 )
 
-from config import ADMIN_IDS, TELEGRAM_SEND_DELAY
+from config import ADMIN_IDS, DATABASE_PATH, TELEGRAM_SEND_DELAY
 from database import Database
 import utils
 from utils.cache import MemoryCache
@@ -68,6 +71,77 @@ def _parse_admin_send_args(text: str) -> tuple[int, str]:
     return chat_id, body
 
 
+def _message_delivery_payload(message: Message) -> tuple[str, str, str]:
+    if message.photo:
+        return "photo", message.photo[-1].file_id, message.caption or ""
+    if message.video:
+        return "video", message.video.file_id, message.caption or ""
+    if message.document:
+        return "document", message.document.file_id, message.caption or ""
+    return "text", "", message.text or message.caption or ""
+
+
+def _build_broadcast_item(message: Message, batch_id: int, chat_id: int) -> utils.PendingDelivery:
+    parts = (message.text or message.caption or "").split(maxsplit=1)
+    override_text = parts[1].strip() if len(parts) > 1 else ""
+    source = message.reply_to_message or message
+    media_type, media_file_id, source_text = _message_delivery_payload(source)
+
+    if media_type == "text":
+        body = override_text or (source_text if source is not message else "")
+        if not body:
+            raise ValueError("usage")
+        return utils.PendingDelivery(
+            kind="broadcast",
+            chat_id=chat_id,
+            text=body,
+            parse_mode="HTML",
+            dedupe_key=("broadcast", batch_id, chat_id),
+        )
+
+    return utils.PendingDelivery(
+        kind="broadcast",
+        chat_id=chat_id,
+        text=override_text or (source_text if source is not message else ""),
+        media_type=media_type,
+        media_file_id=media_file_id,
+        parse_mode="HTML",
+        dedupe_key=("broadcast", batch_id, chat_id),
+    )
+
+
+def _build_admin_send_item(message: Message, batch_id: int) -> utils.PendingDelivery:
+    parts = (message.text or message.caption or "").split(maxsplit=2)
+    if len(parts) < 2:
+        raise ValueError("usage")
+    chat_id = int(parts[1])
+    override_text = parts[2].strip() if len(parts) > 2 else ""
+    source = message.reply_to_message or message
+    media_type, media_file_id, source_text = _message_delivery_payload(source)
+
+    if media_type == "text":
+        body = override_text or (source_text if source is not message else "")
+        if not body:
+            raise ValueError("usage")
+        return utils.PendingDelivery(
+            kind="broadcast",
+            chat_id=chat_id,
+            text=body,
+            parse_mode="HTML",
+            dedupe_key=("admin_send", message.from_user.id, chat_id, batch_id),
+        )
+
+    return utils.PendingDelivery(
+        kind="broadcast",
+        chat_id=chat_id,
+        text=override_text or (source_text if source is not message else ""),
+        media_type=media_type,
+        media_file_id=media_file_id,
+        parse_mode="HTML",
+        dedupe_key=("admin_send", message.from_user.id, chat_id, batch_id),
+    )
+
+
 async def _render_user_card(chat_id: int, db: Database) -> tuple[str, bool] | tuple[None, None]:
     user = await db.get_user(chat_id)
     if not user:
@@ -86,7 +160,9 @@ async def _render_user_card(chat_id: int, db: Database) -> tuple[str, bool] | tu
         f"Последняя активность: <code>{user['last_seen_at']}</code>\n"
         f"Создан: <code>{user['created_at']}</code>\n\n"
         f"Подписки: <b>{counts['subscriptions']}</b>\n"
-        f"Избранное: <b>{counts['favorites']}</b>\n"
+        f"Избранное (сессии): <b>{counts['favorites']}</b>\n"
+        f"Избранное (уикенды): <b>{counts['event_favorites']}</b>\n"
+        f"Не интересно: <b>{counts['ignored_events']}</b>\n"
         f"Персональные reminder'ы: <b>{counts['reminders']}</b>\n"
         f"Отправленных уведомлений: <b>{counts['sent_notifications']}</b>"
     ), bool(user["is_active"])
@@ -141,9 +217,35 @@ def _admin_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔄 Прогреть кэш", callback_data="adm:warmup"),
         ],
         [
+            InlineKeyboardButton(text="💾 Выгрузить БД", callback_data="adm:backup"),
             InlineKeyboardButton(text="🔃 Обновить",     callback_data="adm:refresh"),
         ],
     ])
+
+
+async def _send_db_backup(bot, admin_ids: set[int], db: Database) -> Path:
+    backup_dir = Path(DATABASE_PATH).parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / f"raceday-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.db"
+    archive_path = backup_path.with_suffix(".zip")
+    try:
+        await db.export_backup(str(backup_path))
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(backup_path, arcname=backup_path.name)
+
+        document = FSInputFile(str(archive_path), filename=archive_path.name)
+        caption = f"DB backup ZIP · {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}"
+        for admin_id in admin_ids:
+            await bot.send_document(admin_id, document=document, caption=caption)
+            await asyncio.sleep(TELEGRAM_SEND_DELAY)
+        return archive_path
+    finally:
+        for path in (backup_path, archive_path):
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception as cleanup_exc:
+                log.warning("Backup cleanup failed for %s: %s", path, cleanup_exc)
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -608,22 +710,38 @@ async def cb_warmup(
     await callback.message.answer("✅ Кэш прогрет")
 
 
+@router.callback_query(F.data == "adm:backup")
+async def cb_backup(callback: CallbackQuery, db: Database) -> None:
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет доступа")
+        return
+    await callback.answer("⏳ Готовлю архив БД...")
+    try:
+        await _send_db_backup(callback.bot, {callback.from_user.id}, db)
+    except Exception as exc:
+        log.error("Manual admin backup failed: %s", exc)
+        await callback.message.answer(f"❌ Не удалось отправить БД: <code>{escape(str(exc)[:160])}</code>", parse_mode="HTML")
+        return
+    await callback.message.answer("✅ Архив БД отправлен")
+
+
 # ── Broadcast ─────────────────────────────────────────────────────────────────
 
 @router.message(Command("admin_broadcast"))
 async def cmd_broadcast(message: Message, db: Database, metrics: Metrics) -> None:
     if not _is_admin(message):
         return
+    await _run_admin_broadcast(message, db, metrics)
 
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await message.answer(
-            "Использование: <code>/admin_broadcast Текст сообщения</code>",
-            parse_mode="HTML",
-        )
+
+@router.message(F.caption.startswith("/admin_broadcast"))
+async def cmd_broadcast_caption(message: Message, db: Database, metrics: Metrics) -> None:
+    if not _is_admin(message):
         return
+    await _run_admin_broadcast(message, db, metrics)
 
-    text  = args[1]
+
+async def _run_admin_broadcast(message: Message, db: Database, metrics: Metrics) -> None:
     users = await db.get_all_users(active_only=True)
     total = len(users)
 
@@ -637,13 +755,17 @@ async def cmd_broadcast(message: Message, db: Database, metrics: Metrics) -> Non
     batch_id = int(time.time())
 
     for user in users:
-        item = utils.PendingDelivery(
-            kind="broadcast",
-            chat_id=user["chat_id"],
-            text=text,
-            parse_mode="HTML",
-            dedupe_key=("broadcast", batch_id, user["chat_id"]),
-        )
+        try:
+            item = _build_broadcast_item(message, batch_id, user["chat_id"])
+        except ValueError:
+            await status_msg.edit_text(
+                "Использование:\n"
+                "<code>/admin_broadcast Текст сообщения</code>\n\n"
+                "Или отправьте эту команду в ответ на текст / фото / видео / документ.\n"
+                "Для медиа можно также указать команду в подписи.",
+                parse_mode="HTML",
+            )
+            return
         result = await utils.send_delivery(bot, item)
         if result.status == "success":
             sent += 1
@@ -686,32 +808,39 @@ async def cmd_broadcast(message: Message, db: Database, metrics: Metrics) -> Non
 async def cmd_admin_send(message: Message, db: Database, metrics: Metrics) -> None:
     if not _is_admin(message):
         return
+    await _run_admin_send(message, db, metrics)
+
+
+@router.message(F.caption.startswith("/admin_send"))
+async def cmd_admin_send_caption(message: Message, db: Database, metrics: Metrics) -> None:
+    if not _is_admin(message):
+        return
+    await _run_admin_send(message, db, metrics)
+
+
+async def _run_admin_send(message: Message, db: Database, metrics: Metrics) -> None:
     try:
-        chat_id, body = _parse_admin_send_args(message.text)
+        item = _build_admin_send_item(message, int(time.time()))
     except Exception:
         await message.answer(
-            "Использование: <code>/admin_send CHAT_ID текст сообщения</code>",
+            "Использование:\n"
+            "<code>/admin_send CHAT_ID текст сообщения</code>\n\n"
+            "Или отправьте эту команду в ответ на текст / фото / видео / документ.\n"
+            "Для медиа можно также указать команду в подписи: <code>/admin_send CHAT_ID подпись</code>",
             parse_mode="HTML",
         )
         return
 
-    item = utils.PendingDelivery(
-        kind="broadcast",
-        chat_id=chat_id,
-        text=body,
-        parse_mode="HTML",
-        dedupe_key=("admin_send", message.from_user.id, chat_id, int(time.time())),
-    )
     result = await utils.send_delivery(message.bot, item)
     if result.status == "success":
-        await message.answer(f"✅ Сообщение отправлено пользователю <code>{chat_id}</code>", parse_mode="HTML")
+        await message.answer(f"✅ Сообщение отправлено пользователю <code>{item.chat_id}</code>", parse_mode="HTML")
         return
     if result.status == "blocked":
-        await db.deactivate_user(chat_id)
+        await db.deactivate_user(item.chat_id)
         metrics.blocked_users.inc()
         await message.answer("🚫 Пользователь заблокировал бота.")
         return
     await message.answer(
-        f"❌ Не удалось отправить пользователю <code>{chat_id}</code>: <code>{escape(result.error[:120])}</code>",
+        f"❌ Не удалось отправить пользователю <code>{item.chat_id}</code>: <code>{escape(result.error[:120])}</code>",
         parse_mode="HTML",
     )

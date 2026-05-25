@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from typing import Any
 
 import aiosqlite
@@ -96,6 +97,27 @@ class Database:
                 UNIQUE(chat_id, session_id)
             );
 
+            CREATE TABLE IF NOT EXISTS event_favorites (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id    INTEGER NOT NULL REFERENCES users(chat_id) ON DELETE CASCADE,
+                event_key  TEXT    NOT NULL,
+                title      TEXT    NOT NULL DEFAULT '',
+                sort_ts    INTEGER NOT NULL DEFAULT 0,
+                added_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(chat_id, event_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS ignored_events (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id       INTEGER NOT NULL REFERENCES users(chat_id) ON DELETE CASCADE,
+                event_key     TEXT    NOT NULL,
+                title         TEXT    NOT NULL DEFAULT '',
+                sort_ts       INTEGER NOT NULL DEFAULT 0,
+                expires_at_ts INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(chat_id, event_key)
+            );
+
             CREATE TABLE IF NOT EXISTS session_reminders (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id      INTEGER NOT NULL REFERENCES users(chat_id) ON DELETE CASCADE,
@@ -123,6 +145,9 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_subs_chat  ON subscriptions(chat_id);
             CREATE INDEX IF NOT EXISTS idx_sent_chat  ON sent_notifications(chat_id);
             CREATE INDEX IF NOT EXISTS idx_sent_ts    ON sent_notifications(sent_at);
+            CREATE INDEX IF NOT EXISTS idx_event_favorites_chat ON event_favorites(chat_id);
+            CREATE INDEX IF NOT EXISTS idx_ignored_events_chat ON ignored_events(chat_id);
+            CREATE INDEX IF NOT EXISTS idx_ignored_events_expiry ON ignored_events(expires_at_ts);
             CREATE INDEX IF NOT EXISTS idx_reminders_due ON session_reminders(remind_at_ts);
             CREATE INDEX IF NOT EXISTS idx_log_type   ON event_log(event_type);
             CREATE INDEX IF NOT EXISTS idx_log_chat   ON event_log(chat_id);
@@ -268,6 +293,12 @@ class Database:
             ),
             "favorites": await self._fetchone(
                 "SELECT COUNT(*) n FROM favorites WHERE chat_id=?", (chat_id,)
+            ),
+            "event_favorites": await self._fetchone(
+                "SELECT COUNT(*) n FROM event_favorites WHERE chat_id=?", (chat_id,)
+            ),
+            "ignored_events": await self._fetchone(
+                "SELECT COUNT(*) n FROM ignored_events WHERE chat_id=?", (chat_id,)
             ),
             "reminders": await self._fetchone(
                 "SELECT COUNT(*) n FROM session_reminders WHERE chat_id=?", (chat_id,)
@@ -420,6 +451,77 @@ class Database:
             (chat_id, session_id),
         )
 
+    async def get_event_favorites(self, chat_id: int) -> list[Row]:
+        return await self._fetchall(
+            "SELECT * FROM event_favorites WHERE chat_id=? ORDER BY sort_ts DESC, added_at DESC",
+            (chat_id,),
+        )
+
+    async def is_event_favorite(self, chat_id: int, event_key: str) -> bool:
+        row = await self._fetchone(
+            "SELECT 1 FROM event_favorites WHERE chat_id=? AND event_key=?",
+            (chat_id, event_key),
+        )
+        return row is not None
+
+    async def add_event_favorite(self, chat_id: int, event_key: str, title: str, sort_ts: int) -> None:
+        await self._execute(
+            "INSERT OR REPLACE INTO event_favorites (chat_id, event_key, title, sort_ts) VALUES (?,?,?,?)",
+            (chat_id, event_key, title, sort_ts),
+        )
+
+    async def remove_event_favorite(self, chat_id: int, event_key: str) -> None:
+        await self._execute(
+            "DELETE FROM event_favorites WHERE chat_id=? AND event_key=?",
+            (chat_id, event_key),
+        )
+
+    async def get_ignored_events(self, chat_id: int, now_ts: int | None = None) -> list[Row]:
+        sql = "SELECT * FROM ignored_events WHERE chat_id=?"
+        params: list[Any] = [chat_id]
+        if now_ts is not None:
+            sql += " AND expires_at_ts>?"
+            params.append(now_ts)
+        sql += " ORDER BY sort_ts DESC, created_at DESC"
+        return await self._fetchall(sql, tuple(params))
+
+    async def is_event_ignored(self, chat_id: int, event_key: str, now_ts: int | None = None) -> bool:
+        sql = "SELECT 1 FROM ignored_events WHERE chat_id=? AND event_key=?"
+        params: list[Any] = [chat_id, event_key]
+        if now_ts is not None:
+            sql += " AND expires_at_ts>?"
+            params.append(now_ts)
+        row = await self._fetchone(sql, tuple(params))
+        return row is not None
+
+    async def ignore_event(
+        self,
+        chat_id: int,
+        event_key: str,
+        title: str,
+        sort_ts: int,
+        expires_at_ts: int,
+    ) -> None:
+        await self._execute(
+            "INSERT OR REPLACE INTO ignored_events (chat_id, event_key, title, sort_ts, expires_at_ts) VALUES (?,?,?,?,?)",
+            (chat_id, event_key, title, sort_ts, expires_at_ts),
+        )
+
+    async def unignore_event(self, chat_id: int, event_key: str) -> None:
+        await self._execute(
+            "DELETE FROM ignored_events WHERE chat_id=? AND event_key=?",
+            (chat_id, event_key),
+        )
+
+    async def cleanup_expired_ignored_events(self, now_ts: int) -> int:
+        async with self._db.execute(
+            "DELETE FROM ignored_events WHERE expires_at_ts<=?",
+            (now_ts,),
+        ) as cur:
+            deleted = cur.rowcount
+        await self._db.commit()
+        return deleted
+
     # ── Session reminders ────────────────────────────────────────────────────
 
     async def get_session_reminders(self, chat_id: int, session_id: str) -> list[Row]:
@@ -499,3 +601,10 @@ class Database:
 
     async def clear_cache(self) -> None:
         await self._execute("DELETE FROM api_cache")
+
+    async def export_backup(self, target_path: str) -> None:
+        target = sqlite3.connect(target_path)
+        try:
+            await self._db.backup(target)
+        finally:
+            target.close()

@@ -68,6 +68,10 @@ PRACTICE_KEYWORDS = frozenset({
     "test", "testing",
 })
 
+_SERIES_DISPLAY_ALIASES = {
+    "IMSA WeatherTech SportsCar Championship": "IMSA WeatherTech Championship",
+}
+
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
 
@@ -118,6 +122,36 @@ def session_category(name: str) -> str:
     if is_practice(name):
         return "practice"
     return "race"
+
+
+def display_series_name(name: str) -> str:
+    return _SERIES_DISPLAY_ALIASES.get(name, name)
+
+
+def display_subject_icon(name: str, kind: str = "series") -> str:
+    normalized = display_series_name(name or "").lower()
+
+    if any(token in normalized for token in ("rookies", "junior", "juniors", "academy", "feeder", "f1 academy")):
+        return "🧒"
+    if any(token in normalized for token in ("motogp", "moto2", "moto3", "superbike", "motocross", "supercross", "motoamerica", "speedway")):
+        return "🏍️"
+    if any(token in normalized for token in ("kart", "karting")):
+        return "🟨"
+    if any(token in normalized for token in ("rallycross", "rally", "dakar", "raid", "wrc", "erc")):
+        return "🚗"
+    if any(token in normalized for token in ("touring", "tcr", "stock car", "truck", "supercars championship")):
+        return "🚙"
+    if any(token in normalized for token in ("nascar", "indycar", "indy nxt", "arca", "oval", "sprint car", "late model")):
+        return "🏁"
+    if any(token in normalized for token in ("wec", "world endurance championship", "endurance", "prototype", "hypercar", "lmp", "imsa")):
+        return "⏱️"
+    if any(token in normalized for token in ("gt3", "gt4", "gt ", " super gt", "sportscar", "porsche", "ferrari challenge", "lamborghini", "dtm")):
+        return "🏎️"
+    if any(token in normalized for token in ("formula", "f1", "f2", "f3", "f4", "formula e", "formula regional", "super formula")):
+        return "🏎️"
+    if kind == "vehicle_class":
+        return "🏷️"
+    return "🏁"
 
 
 def _category_label(name: str, ui_lang: str = DEFAULT_UI_LANG) -> str:
@@ -181,7 +215,11 @@ def session_card(
     notes:    str  = session.get("notes") or ""
     status:   int  = session.get("status", 0)
     emoji          = class_emojis(session)
-    series_names   = " · ".join(s.get("name", "") for s in session.get("series", []))
+    series_names   = " · ".join(
+        f"{display_subject_icon(s.get('name', ''), 'series')} {display_series_name(s.get('name', ''))}"
+        for s in session.get("series", [])
+        if s.get("name")
+    )
     category_label = _category_label(name, ui_lang)
 
     if compact:

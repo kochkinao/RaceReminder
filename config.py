@@ -26,7 +26,7 @@ CHANNEL_LINK: str | None = os.getenv("CHANNEL_LINK") or None
 DEFAULT_SERIES_NAMES: list[str] = [
     "Formula 1",
     "FIA World Endurance Championship",
-    "IMSA SportsCar Championship",
+    "IMSA",
     "FIA World Rally Championship",
     "NASCAR Cup Series",
     "IndyCar Series",
@@ -34,6 +34,12 @@ DEFAULT_SERIES_NAMES: list[str] = [
     "DTM",
     "Supercars Championship",
     "MotoGP",
+]
+
+DEFAULT_ONBOARDING_SERIES_NAMES: list[str] = [
+    "Formula 1",
+    "FIA World Endurance Championship",
+    "IMSA",
 ]
 
 DEFAULT_VEHICLE_CLASS_NAMES: list[str] = [
@@ -49,7 +55,7 @@ SEARCH_ALIASES: dict[str, str] = {
     "f1":       "Formula 1",
     "formula1": "Formula 1",
     "wec":      "FIA World Endurance Championship",
-    "imsa":     "IMSA SportsCar Championship",
+    "imsa":     "IMSA",
     "wrc":      "FIA World Rally Championship",
     "nascar":   "NASCAR Cup Series",
     "indycar":  "IndyCar Series",

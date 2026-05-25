@@ -55,3 +55,34 @@ def test_kb_group_menu_uses_localized_back_to_sections_label() -> None:
     ]
 
     assert "◀️ Sections" in labels
+
+
+def test_subscriptions_notify_list_uses_single_bulk_toggles() -> None:
+    kb = utils.subscriptions_notify_list([
+        {"type": "series", "ref_id": "1", "ref_name": "Formula 1", "qualifying_notify": 1, "practice_notify": 0},
+    ], lang="ru")
+
+    assert kb.inline_keyboard[0][0].text == "✅ Все квалы"
+    assert kb.inline_keyboard[0][1].text == "❌ Все практики"
+    assert len(kb.inline_keyboard[0]) == 2
+
+
+def test_subscriptions_notify_list_shows_partial_state() -> None:
+    kb = utils.subscriptions_notify_list([
+        {"type": "series", "ref_id": "1", "ref_name": "Formula 1", "qualifying_notify": 1, "practice_notify": 1},
+        {"type": "vehicle_class", "ref_id": "2", "ref_name": "GT3", "qualifying_notify": 0, "practice_notify": 1},
+    ], lang="ru")
+
+    assert kb.inline_keyboard[0][0].text == "◐ Все квалы"
+    assert kb.inline_keyboard[0][1].text == "✅ Все практики"
+
+
+def test_subscription_notify_callback_fits_telegram_limit() -> None:
+    callback = utils.SubNotifyCD(
+        action="t",
+        type="s",
+        ref_id="b4b60889-3e21-427d-a4fc-ff1b04e09a6d",
+        field="q",
+    ).pack()
+
+    assert len(callback.encode()) <= 64

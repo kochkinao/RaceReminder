@@ -41,6 +41,39 @@ async def _load_sessions_index(
     return sessions_by_id
 
 
+async def _load_events_index(
+    db: Database,
+    mem: MemoryCache,
+    http_session,
+    ui_lang: str,
+) -> dict[str, dict]:
+    sessions = list((await _load_sessions_index(db, mem, http_session)).values())
+    return utils.group_sessions_by_event(sessions, ui_lang)
+
+
+async def _load_session_event_map(
+    db: Database,
+    mem: MemoryCache,
+    http_session,
+    ui_lang: str,
+) -> dict[str, dict]:
+    sessions = list((await _load_sessions_index(db, mem, http_session)).values())
+    return utils.map_sessions_to_events(sessions, ui_lang)
+
+
+async def _migrate_legacy_favorites(
+    chat_id: int,
+    db: Database,
+    session_event_map: dict[str, dict],
+) -> None:
+    legacy = await db.get_favorites(chat_id)
+    for row in legacy:
+        event = session_event_map.get(row["session_id"])
+        if not event:
+            continue
+        await db.add_event_favorite(chat_id, event["event_key"], event["title"], event["sort_ts"])
+
+
 async def _render_reminder_menu(
     callback: CallbackQuery,
     db: Database,
@@ -101,13 +134,18 @@ async def _render_session(
         ui_lang=lang,
     ) or utils.tr(lang, "session.no_filtered_data")
 
-    is_fav = await db.is_favorite(callback.from_user.id, session_id)
+    session_event_map = await _load_session_event_map(db, mem, http_session, lang)
+    event = session_event_map.get(session_id)
+    event_identity = utils.build_event_identity(session, lang)
+    event_key = event["event_key"] if event else event_identity.key
+    is_fav = await db.is_event_favorite(callback.from_user.id, event_key)
+    is_ignored = await db.is_event_ignored(callback.from_user.id, event_key, int(time.time()))
     await utils.safe_edit_text(
         callback.message,
         card,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=utils.session_actions(session_id, is_fav, lang),
+        reply_markup=utils.session_actions(session_id, event_key, is_fav, is_ignored, lang),
     )
 
 
@@ -126,7 +164,10 @@ async def _show_favorites(target: Message | CallbackQuery, db: Database, mem: Me
     chat_id = target.from_user.id if isinstance(target, CallbackQuery) else target.chat.id
     user = await db.get_or_create_user(chat_id, getattr(getattr(target, "from_user", None), "username", None))
     lang = utils.get_ui_lang(user)
-    favorites = await db.get_favorites(chat_id)
+    events_index = await _load_events_index(db, mem, http_session, lang)
+    session_event_map = await _load_session_event_map(db, mem, http_session, lang)
+    await _migrate_legacy_favorites(chat_id, db, session_event_map)
+    favorites = await db.get_event_favorites(chat_id)
     if not favorites:
         text = utils.tr(lang, "favorites.empty")
         if isinstance(target, CallbackQuery):
@@ -135,16 +176,17 @@ async def _show_favorites(target: Message | CallbackQuery, db: Database, mem: Me
             await target.answer(text, parse_mode="HTML", reply_markup=utils.back_to_menu(lang))
         return
 
-    sessions_by_id = await _load_sessions_index(db, mem, http_session)
     rows = []
     missing = 0
     for fav in favorites:
-        session = sessions_by_id.get(fav["session_id"])
-        if not session:
+        event = events_index.get(fav["event_key"])
+        if not event:
             missing += 1
             continue
-        title = session.get("name", "Session" if lang == "en" else "Сессия")
-        rows.append([InlineKeyboardButton(text=title[:48], callback_data=f"session:{fav['session_id']}")])
+        rows.append([InlineKeyboardButton(
+            text=event["title"][:48],
+            callback_data=utils.EventViewCD(event_key=fav["event_key"], source="f").pack(),
+        )])
 
     rows.append([InlineKeyboardButton(text=utils.tr(lang, "menu.back_to_menu"), callback_data="main_menu")])
     text = utils.tr(lang, "favorites.title")
@@ -155,6 +197,84 @@ async def _show_favorites(target: Message | CallbackQuery, db: Database, mem: Me
         await utils.safe_edit_text(target.message, text, parse_mode="HTML", reply_markup=markup)
     else:
         await target.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.callback_query(F.data == "ignored_events")
+async def cb_ignored_events(callback: CallbackQuery, db: Database, mem: MemoryCache, runtime_state) -> None:
+    await callback.answer()
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    ignored = await db.get_ignored_events(callback.from_user.id, int(time.time()))
+    if not ignored:
+        await utils.safe_edit_text(
+            callback.message,
+            utils.tr(lang, "ignored.empty"),
+            parse_mode="HTML",
+            reply_markup=utils.back_to_menu(lang),
+        )
+        return
+
+    events_index = await _load_events_index(db, mem, runtime_state.http_session, lang)
+    rows = []
+    for item in ignored:
+        title = events_index.get(item["event_key"], {}).get("title") or item["title"]
+        rows.append([InlineKeyboardButton(
+            text=title[:48],
+            callback_data=utils.EventViewCD(event_key=item["event_key"], source="i").pack(),
+        )])
+    rows.append([InlineKeyboardButton(text=utils.tr(lang, "menu.back_to_menu"), callback_data="main_menu")])
+    await utils.safe_edit_text(
+        callback.message,
+        utils.tr(lang, "ignored.title"),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+async def _render_event(
+    callback: CallbackQuery,
+    db: Database,
+    mem: MemoryCache,
+    http_session,
+    event_key: str,
+    source: str = "",
+) -> None:
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    events_index = await _load_events_index(db, mem, http_session, lang)
+    event = events_index.get(event_key)
+    if not event:
+        await callback.answer(utils.tr(lang, "event.not_found"), show_alert=True)
+        return
+
+    text = utils.render_event_summary(event, user["timezone"], lang, utils.fmt_time, utils.session_category)
+    is_favorite = await db.is_event_favorite(callback.from_user.id, event_key)
+    is_ignored = await db.is_event_ignored(callback.from_user.id, event_key, int(time.time()))
+    await utils.safe_edit_text(
+        callback.message,
+        text,
+        parse_mode="HTML",
+        reply_markup=utils.event_actions(
+            event_key,
+            is_favorite,
+            is_ignored,
+            lang,
+            "favorites" if source == "f" else "ignored_events" if source == "i" else "main_menu",
+            source,
+        ),
+    )
+
+
+@router.callback_query(utils.EventViewCD.filter())
+async def cb_event_view(
+    callback: CallbackQuery,
+    callback_data: utils.EventViewCD,
+    db: Database,
+    mem: MemoryCache,
+    runtime_state,
+) -> None:
+    await callback.answer()
+    await _render_event(callback, db, mem, runtime_state.http_session, callback_data.event_key, callback_data.source)
 
 
 @router.callback_query(F.data.startswith("session:"))
@@ -169,26 +289,76 @@ async def cb_session_details(
     await _render_session(callback, db, mem, runtime_state.http_session, session_id)
 
 
-@router.callback_query(utils.FavCD.filter())
-async def cb_favorite_toggle(
+@router.callback_query(utils.EventActionCD.filter())
+async def cb_event_action(
     callback: CallbackQuery,
-    callback_data: utils.FavCD,
+    callback_data: utils.EventActionCD,
     db: Database,
     mem: MemoryCache,
     runtime_state,
 ) -> None:
-    await callback.answer()
-    session_id = callback_data.session_id
-    if callback_data.action == "remove":
-        await db.remove_favorite(callback.from_user.id, session_id)
-        user = await db.get_or_create_user(callback.from_user.id)
-        notice = utils.tr(utils.get_ui_lang(user), "session.favorite_removed")
-    else:
-        await db.add_favorite(callback.from_user.id, session_id)
-        user = await db.get_or_create_user(callback.from_user.id)
-        notice = utils.tr(utils.get_ui_lang(user), "session.favorite_added")
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    event_key = callback_data.event_key
+    events_index = await _load_events_index(db, mem, runtime_state.http_session, lang)
+    event = events_index.get(event_key)
+    if not event:
+        await callback.answer(utils.tr(lang, "event.not_found"), show_alert=True)
+        return
 
-    await _render_session(callback, db, mem, runtime_state.http_session, session_id, notice=notice)
+    if callback_data.action == "r":
+        await db.remove_event_favorite(callback.from_user.id, event_key)
+        notice = utils.tr(lang, "session.favorite_removed")
+    elif callback_data.action == "a":
+        await db.add_event_favorite(callback.from_user.id, event_key, event["title"], event["sort_ts"])
+        notice = utils.tr(lang, "session.favorite_added")
+    elif callback_data.action == "i":
+        last_end_ts = max(
+            int(item.get("start", 0) or 0) + int(item.get("durationMinutes", 0) or 0) * 60
+            for item in event["sessions"]
+        )
+        await db.ignore_event(
+            callback.from_user.id,
+            event_key,
+            event["title"],
+            event["sort_ts"],
+            last_end_ts + 86_400,
+        )
+        notice = utils.tr(lang, "ignored.added")
+    elif callback_data.action == "u":
+        await db.unignore_event(callback.from_user.id, event_key)
+        notice = utils.tr(lang, "ignored.removed")
+    else:
+        return
+
+    is_favorite = await db.is_event_favorite(callback.from_user.id, event_key)
+    is_ignored = await db.is_event_ignored(callback.from_user.id, event_key, int(time.time()))
+    if callback_data.session_id:
+        await utils.safe_edit_reply_markup(
+            callback.message,
+            reply_markup=utils.session_actions(
+                callback_data.session_id,
+                event_key,
+                is_favorite,
+                is_ignored,
+                lang,
+            ),
+        )
+        await callback.answer(notice)
+        return
+
+    await utils.safe_edit_reply_markup(
+        callback.message,
+        reply_markup=utils.event_actions(
+            event_key,
+            is_favorite,
+            is_ignored,
+            lang,
+            "favorites" if callback_data.source == "f" else "ignored_events" if callback_data.source == "i" else "main_menu",
+            callback_data.source,
+        ),
+    )
+    await callback.answer(notice)
 
 
 @router.callback_query(utils.RemindCD.filter())

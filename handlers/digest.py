@@ -113,8 +113,8 @@ def _digest_summary_text(
 def _selected_digest_header(header: str, sub: dict | None, lang: str) -> str:
     if not sub:
         return header
-    prefix = "🏎️" if sub["type"] == "series" else "🏷️"
-    name = utils.tr(lang, "rscg.name") if sub["type"] == "rscg" else sub["ref_name"]
+    prefix = utils.display_subject_icon(sub["ref_name"], sub["type"]) if sub["type"] != "rscg" else "🏎️"
+    name = utils.tr(lang, "rscg.name") if sub["type"] == "rscg" else utils.display_series_name(sub["ref_name"])
     return f"{header}\n{utils.tr(lang, 'digest.filter')}: {prefix} <b>{name}</b>"
 
 
@@ -303,7 +303,7 @@ def _history_filter_label(
     for sub in subs:
         if sub["ref_id"] == ref_id:
             key = "digest.filter_series" if filter_type == "series" else "digest.filter_class"
-            return utils.tr(lang, key, name=sub["ref_name"])
+            return utils.tr(lang, key, name=utils.display_series_name(sub["ref_name"]))
     return filter_type
 
 

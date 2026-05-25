@@ -97,6 +97,8 @@ async def test_user_counts_and_debug_queries(db: database.Database) -> None:
     await db.create_user(1001, "u1")
     await db.add_subscription(1001, "series", "series-1", "Formula Test")
     await db.add_favorite(1001, "session-1")
+    await db.add_event_favorite(1001, "event-1", "Formula Test · Imola", 1000)
+    await db.ignore_event(1001, "event-2", "Muted Weekend", 1100, 999999)
     await db.add_session_reminder(1001, "session-1", "1hour", 1000)
     await db.mark_notified_batch([(1001, "session-1", "1hour")])
     await db.log_event("custom_debug", 1001, {"ok": True})
@@ -108,8 +110,25 @@ async def test_user_counts_and_debug_queries(db: database.Database) -> None:
     assert counts == {
         "subscriptions": 1,
         "favorites": 1,
+        "event_favorites": 1,
+        "ignored_events": 1,
         "reminders": 1,
         "sent_notifications": 1,
     }
     assert sent[0]["session_id"] == "session-1"
     assert events[0]["event_type"] == "custom_debug"
+
+
+@pytest.mark.asyncio
+async def test_event_favorites_and_ignored_events(db: database.Database) -> None:
+    await db.create_user(1001, "u1")
+    await db.add_event_favorite(1001, "event-a", "Weekend A", 200)
+    await db.ignore_event(1001, "event-b", "Weekend B", 300, 5000)
+
+    favorites = await db.get_event_favorites(1001)
+    ignored = await db.get_ignored_events(1001, now_ts=1000)
+
+    assert favorites[0]["event_key"] == "event-a"
+    assert ignored[0]["event_key"] == "event-b"
+    assert await db.is_event_favorite(1001, "event-a") is True
+    assert await db.is_event_ignored(1001, "event-b", now_ts=1000) is True

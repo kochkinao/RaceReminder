@@ -97,14 +97,14 @@ def _search_results_keyboard(
     for series in series_matches[:10]:
         prefix = "💔" if series["id"] in subscribed_series_ids else "✅"
         btns.append([InlineKeyboardButton(
-            text=f"{prefix} 🏎️ {series['name']}",
+            text=f"{prefix} {utils.display_subject_icon(series['name'], 'series')} {utils.display_series_name(series['name'])}",
             callback_data=utils.SearchToggleCD(type="series", ref_id=series["id"]).pack(),
         )])
 
     for vehicle_class in class_matches[:10]:
         prefix = "💔" if vehicle_class["id"] in subscribed_class_ids else "✅"
         btns.append([InlineKeyboardButton(
-            text=f"{prefix} 🏷️ {vehicle_class['name']}",
+            text=f"{prefix} {utils.display_subject_icon(vehicle_class['name'], 'vehicle_class')} {vehicle_class['name']}",
             callback_data=utils.SearchToggleCD(type="vehicle_class", ref_id=vehicle_class["id"]).pack(),
         )])
 

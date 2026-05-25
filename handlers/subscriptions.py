@@ -17,7 +17,7 @@ router = Router()
 def _display_sub_name(sub: dict, lang: str) -> str:
     if sub.get("type") == "rscg" and sub.get("ref_id") == "rscg":
         return utils.tr(lang, "rscg.name")
-    return sub.get("ref_name", "")
+    return utils.display_series_name(sub.get("ref_name", ""))
 
 
 def _sub_kind_label(type_: str) -> str:
@@ -35,7 +35,7 @@ def _notify_text(sub: dict, lang: str) -> str:
         lang,
         "subscriptions.notify_card",
         kind=utils.tr(lang, kind_key),
-        name=_display_sub_name(sub, lang),
+        name=f"{utils.display_subject_icon(sub.get('ref_name', ''), sub['type'])} {_display_sub_name(sub, lang)}",
         qual_state=utils.bool_text(lang, bool(sub.get("qualifying_notify", 1))),
         practice_state=utils.bool_text(lang, bool(sub.get("practice_notify", 1))),
     )
@@ -107,20 +107,20 @@ async def cb_my_subs(callback: CallbackQuery, db: Database) -> None:
     
     if series_subs:
         parts.append(utils.tr(lang, "subscriptions.series_label"))
-        parts.extend(f"  • {_display_sub_name(s, lang)}" for s in series_subs)
+        parts.extend(f"  • {utils.display_subject_icon(s.get('ref_name', ''), s['type'])} {_display_sub_name(s, lang)}" for s in series_subs)
     
     if class_subs:
         # Добавляем пустую строку-разделитель только если уже есть серии
         if series_subs:
             parts.append("")  # пустая строка для отступа между блоками
         parts.append(utils.tr(lang, "subscriptions.classes_label"))
-        parts.extend(f"  • {_display_sub_name(s, lang)}" for s in class_subs)
+        parts.extend(f"  • {utils.display_subject_icon(s.get('ref_name', ''), s['type'])} {_display_sub_name(s, lang)}" for s in class_subs)
 
     if rscg_subs:
         if series_subs or class_subs:
             parts.append("")
         parts.append(utils.tr(lang, "subscriptions.rscg_label"))
-        parts.extend(f"  • {_display_sub_name(s, lang)}" for s in rscg_subs)
+        parts.extend(f"  • 🏎️ {_display_sub_name(s, lang)}" for s in rscg_subs)
     
     # Объединяем через \n – теперь каждый элемент – отдельная строка без лишних \n внутри
     text = "\n".join(parts)
@@ -157,7 +157,7 @@ async def cb_subs_notify(callback: CallbackQuery, db: Database) -> None:
     )
 
 
-@router.callback_query(utils.SubNotifyCD.filter(F.action == "open"))
+@router.callback_query(utils.SubNotifyCD.filter(F.action == "o"))
 async def cb_sub_notify_open(
     callback: CallbackQuery,
     callback_data: utils.SubNotifyCD,
@@ -170,7 +170,7 @@ async def cb_sub_notify_open(
     sub = next(
         (
             s for s in subs
-            if s["type"] == callback_data.type and s["ref_id"].startswith(callback_data.ref_id)
+            if s["type"] == ("series" if callback_data.type == "s" else "vehicle_class") and s["ref_id"] == callback_data.ref_id
         ),
         None,
     )
@@ -185,38 +185,41 @@ async def cb_sub_notify_open(
     )
 
 
-@router.callback_query(utils.SubNotifyCD.filter(F.action == "toggle"))
+@router.callback_query(utils.SubNotifyCD.filter(F.action == "t"))
 async def cb_sub_notify_toggle(
     callback: CallbackQuery,
     callback_data: utils.SubNotifyCD,
     db: Database,
 ) -> None:
     await callback.answer()
-    if callback_data.field not in {"qualifying_notify", "practice_notify"}:
+    field_map = {"q": "qualifying_notify", "p": "practice_notify"}
+    if callback_data.field not in field_map:
         return
+    resolved_field = field_map[callback_data.field]
 
     subs = await db.get_subscriptions(callback.from_user.id)
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
+    sub_type = "series" if callback_data.type == "s" else "vehicle_class"
     sub = next(
         (
             s for s in subs
-            if s["type"] == callback_data.type and s["ref_id"].startswith(callback_data.ref_id)
+            if s["type"] == sub_type and s["ref_id"] == callback_data.ref_id
         ),
         None,
     )
     if not sub:
         return
 
-    new_value = 0 if sub.get(callback_data.field, 1) else 1
-    updates = {callback_data.field: new_value}
-    if callback_data.field == "qualifying_notify":
+    new_value = 0 if sub.get(resolved_field, 1) else 1
+    updates = {resolved_field: new_value}
+    if resolved_field == "qualifying_notify":
         updates["qual_notify"] = new_value
 
     await db.update_subscription(
         callback.from_user.id,
-        callback_data.type,
-        sub["ref_id"],  # полный UUID из БД, не обрезанный из callback
+        sub_type,
+        sub["ref_id"],
         **updates,
     )
     sub.update(updates)
@@ -226,6 +229,37 @@ async def cb_sub_notify_toggle(
         _notify_text(sub, lang),
         parse_mode="HTML",
         reply_markup=utils.subscription_notify_menu(sub, lang),
+    )
+
+
+@router.callback_query(F.data.startswith("subs_notify_bulk:"))
+async def cb_sub_notify_bulk(callback: CallbackQuery, db: Database) -> None:
+    await callback.answer()
+    _, field, raw_value = callback.data.split(":", 2)
+    if field not in {"qualifying_notify", "practice_notify"}:
+        return
+    value = 1 if raw_value == "1" else 0
+    subs = [
+        sub for sub in await db.get_subscriptions(callback.from_user.id)
+        if sub["type"] in {"series", "vehicle_class"}
+    ]
+    for sub in subs:
+        updates = {field: value}
+        if field == "qualifying_notify":
+            updates["qual_notify"] = value
+        await db.update_subscription(callback.from_user.id, sub["type"], sub["ref_id"], **updates)
+
+    user = await db.get_or_create_user(callback.from_user.id)
+    lang = utils.get_ui_lang(user)
+    refreshed = [
+        sub for sub in await db.get_subscriptions(callback.from_user.id)
+        if sub["type"] in {"series", "vehicle_class"}
+    ]
+    await utils.safe_edit_text(
+        callback.message,
+        utils.tr(lang, "subscriptions.notify_title"),
+        parse_mode="HTML",
+        reply_markup=utils.subscriptions_notify_list(refreshed, lang),
     )
 
 
@@ -359,7 +393,7 @@ async def cb_series_info(
     if not s:
         return
 
-    name = s.get("name", "")
+    name = utils.display_series_name(s.get("name", ""))
     info = utils.get_series_info(name)
     if info:
         text = utils.format_card(name, info, lang=lang)

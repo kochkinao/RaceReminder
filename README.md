@@ -1,138 +1,194 @@
-# RaceDay Bot 🏁
+# RaceReminder Bot
 
-Telegram-бот для отслеживания гоночного календаря с данными **RaceDay.watch**.
+Telegram-бот для гоночного календаря `RaceDay.watch`. Он собирает расписание по подпискам, шлёт уведомления о гонках, показывает live timing и помогает хранить интересные уикенды в `Избранном`.
 
-Объединяет архитектурные решения из **TrainingSchedule** (Database-класс, CallbackData,
-Throttling/Subscription middlewares) с парсером RaceDay API и функциональностью уведомлений.
+## Что умеет
 
-Требует **Python 3.14+**
+- Подписки на серии, классы и `СМП РСКГ`
+- Экраны `Сегодня`, `Неделя`, `История`, `Избранное`, `Не интересно`
+- Поиск серий и классов
+- База знаний по сериям, классам и терминам
+- Уведомления за `3 дня`, `1 день`, `1 час` и в момент старта
+- Отдельные настройки уведомлений для квалификаций и практик
+- Массовые переключатели для всех квал и всех практик
+- Live timing прямо в уведомлениях, если он доступен
+- `Избранное` и `Не интересно` на уровне всего гоночного уикенда
+- Ежедневный zip-backup базы, который уходит админу
 
----
+## Как это работает
 
-## Структура
+1. Пользователь выбирает подписки на серии и/или классы.
+2. Бот получает календарь из `RaceDay.watch` и фильтрует его по подпискам.
+3. Для нового пользователя по умолчанию включаются только:
+   - `Formula 1`
+   - `WEC`
+   - `IMSA`
+4. `Сегодня` показывает ближайшие сессии, а `Неделя` собирает обзор всего уикенда.
+5. В `Профиле` настраиваются язык интерфейса, часовой пояс, языки трансляций, дайджест и глобальные уведомления.
+6. В разделе `Уведомления о квалах и практиках` можно отдельно включать и выключать такие уведомления по подпискам.
+7. В уведомлениях есть действия `Избранное` и `Не интересно`.
+8. `Избранное` помогает быстро найти уикенд позже, а `Не интересно` отключает уведомления по этому уикенду до конца события.
+9. Фильтр языков влияет только на список трансляций. Если подходящей трансляции нет, сам уикенд всё равно остаётся в расписании.
 
-```
-raceday_final/
-├── main.py                 # Точка входа. Middlewares и роутеры — здесь, нигде больше.
-├── config.py               # Все константы из .env
-├── database.py             # class Database — единственный способ работы с БД
-├── scheduler.py            # APScheduler: уведомления (каждый час) + дайджест (пн)
-├── pyproject.toml
-│
-├── states/
-│   ├── __init__.py
-│   └── user.py             # OnboardingStates, ProfileStates, SearchStates
-│
-├── middlewares/
-│   ├── __init__.py
-│   ├── db.py               # Инжектирует db в data['db'] каждого хендлера
-│   ├── throttling.py       # 1 сообщение/сек на пользователя
-│   └── subscription.py     # Гейт подписки на канал (если CHANNEL_ID задан)
-│
-├── handlers/
-│   ├── __init__.py         # from . import start, profile, ...
-│   ├── start.py            # /start, /menu, онбординг, check_sub
-│   ├── profile.py          # /profile, все настройки
-│   ├── subscriptions.py    # /subscriptions, браузер серий/классов
-│   ├── digest.py           # /today, /week, /history, избранное, напоминания
-│   └── search.py           # /search, /kb
-│
-└── utils/
-    ├── __init__.py         # Реэкспорт всего публичного API
-    ├── api.py              # gRPC-Web клиент + кэш через db
-    ├── formatters.py       # session_card, build_digest, notification_text
-    ├── images.py           # Pillow баннеры (градиент по классу авто)
-    ├── kb.py               # Все InlineKeyboard + CallbackData-классы
-    └── knowledge_base.py   # Описания 11 серий, format_card
-```
+## Стек
 
----
-
-## Что взято откуда
-
-| Решение | Источник |
-|---------|----------|
-| `class Database` с методами | TrainingSchedule |
-| `CallbackData` (`SubToggleCD`, `FavCD` …) | TrainingSchedule |
-| `ThrottlingMiddleware` | TrainingSchedule |
-| `SubscriptionMiddleware` (канал) | TrainingSchedule |
-| `DatabaseMiddleware` (инжекция `db`) | новое |
-| `PRAGMA foreign_keys = ON` | TrainingSchedule |
-| `states/` как отдельный пакет | TrainingSchedule |
-| gRPC-Web парсер + кэш | RaceDay |
-| `match` statement в парсерах | RaceDay / Python 3.14 |
-| `type` aliases (`type Row = ...`) | Python 3.14 |
-| Все keyboard-функции в `utils/kb.py` | новое |
-| `dp.include_routers()` без цикл. импортов | новое |
-| `pyproject.toml` вместо `requirements.txt` | новое |
-
----
+- Python 3.12+
+- `aiogram`
+- `aiohttp`
+- `aiosqlite`
+- `apscheduler`
+- `pytz`
+- SQLite в режиме `WAL`
 
 ## Быстрый старт
 
+Установите зависимости:
+
 ```bash
-# Python 3.14 + uv
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv python install 3.14
-cd raceday_final
-uv sync
-
-cp .env.example .env
-# Вставить BOT_TOKEN в .env
-
-uv run python main.py
+pip install -r requirements.txt
 ```
 
-### pip
+Создайте `.env`:
+
+```env
+BOT_TOKEN=...
+ADMIN_IDS=123456789,987654321
+DATABASE_PATH=data/raceday.db
+LOG_LEVEL=INFO
+API_BASE_URL=https://api.raceday.watch
+CHANNEL_ID=
+CHANNEL_LINK=
+```
+
+Запуск:
 
 ```bash
-python3.14 -m venv venv && source venv/bin/activate
-pip install aiogram==3.28.2 aiosqlite==0.22.1 apscheduler==3.11.2 \
-            aiohttp==3.13.5 pillow==12.1.1 python-dotenv==1.0.1 \
-            pytz==2026.2
 python main.py
 ```
 
----
+## Основные команды
 
-## Деплой (systemd)
+- `/start` - запуск и первичная настройка
+- `/menu` - главное меню
+- `/today` - ближайшие гонки по подпискам
+- `/week` - недельный обзор
+- `/favorites` - избранные уикенды
+- `/admin` - админ-панель
+- `/admin_user CHAT_ID` - карточка пользователя
+- `/admin_broadcast ...` - массовая рассылка
+- `/admin_send CHAT_ID ...` - отправка сообщения одному пользователю
 
-```ini
-[Unit]
-Description=RaceDay Telegram Bot
-After=network.target
+## Админка
 
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/raceday_final
-ExecStart=/home/ubuntu/raceday_final/venv/bin/python main.py
-Restart=always
-RestartSec=10
-EnvironmentFile=/home/ubuntu/raceday_final/.env
+В админ-панели доступны:
 
-[Install]
-WantedBy=multi-user.target
-```
+- список пользователей и статистика
+- метрики и состояние jobs
+- журнал событий и последние ошибки
+- кэш и его очистка
+- прогрев кэша
+- выгрузка базы данных в zip-архив
+
+Рассылка из админки поддерживает:
+
+- текст
+- фото с подписью
+- видео с подписью
+- документ с подписью
+
+## Модель данных
+
+### `users`
+
+Хранит:
+
+- язык интерфейса
+- часовой пояс
+- языки трансляций
+- дайджест
+- тихие часы
+- глобальные флаги уведомлений
+
+### `subscriptions`
+
+Хранит подписки на:
+
+- `series`
+- `vehicle_class`
+- `rscg`
+
+Для обычных серий и классов есть отдельные флаги:
+
+- `qualifying_notify`
+- `practice_notify`
+
+### `event_favorites`
+
+Хранит избранные уикенды на уровне события, а не отдельной сессии.
+
+### `ignored_events`
+
+Хранит уикенды, по которым пользователь отключил уведомления до конца события.
+
+### `session_reminders`
+
+Хранит персональные напоминания по конкретным сессиям.
+
+## Ограничения
+
+- В API нет явного `event_id`, поэтому уикенды собираются по серии, локации и временной близости сессий.
+- Старые записи `favorites` оставлены ради совместимости, но новая логика использует `event_favorites`.
+- `Не интересно` не скрывает уикенд из `Сегодня` и `Неделя`, а только глушит уведомления.
+
+## Планировщик
+
+Основные jobs:
+
+- `cache_warmup`
+- `notifications`
+- `weekly_digest`
+- `session_reminders`
+- `retry_delivery`
+- `rscg_notifications`
+- `db_cleanup`
+- `admin_backup`
+
+Что делают:
+
+- прогревают кэш
+- шлют уведомления о гонках
+- отправляют недельный дайджест
+- обрабатывают персональные напоминания
+- повторяют неудачные доставки
+- шлют уведомления по `СМП РСКГ`
+- чистят старые технические записи
+- отправляют ежедневный zip-backup базы администраторам
+
+## Тесты
+
+Запуск всего набора:
 
 ```bash
-sudo systemctl enable --now raceday-bot
-sudo journalctl -u raceday-bot -f
+pytest
 ```
 
----
+Часто полезный набор:
 
-## Переменные окружения
+```bash
+pytest tests/test_database.py tests/test_scheduler.py tests/test_session_details.py tests/test_kb_navigation.py tests/test_timezones_and_events.py
+```
 
-| Переменная | Обязательна | Описание |
-|------------|-------------|----------|
-| `BOT_TOKEN` | ✅ | Токен от @BotFather |
-| `DATABASE_PATH` | — | Путь к SQLite (default: `data/raceday.db`) |
-| `API_BASE_URL` | — | Базовый URL API (default: `https://api.raceday.watch`) |
-| `API_FALLBACK_STALE_SECONDS` | — | Максимальный возраст stale L2 cache для fallback (default: `604800`) |
-| `LOG_LEVEL` | — | `INFO` / `DEBUG` / `WARNING` |
-| `CHANNEL_ID` | — | ID канала для гейта (напр. `@mychannel`) |
-| `CHANNEL_LINK` | — | Ссылка на канал для кнопки |
+## Структура проекта
 
-При недоступности `raceday.watch` бот умеет использовать `stale` данные из SQLite-кэша
-как fallback source, если они не старше `API_FALLBACK_STALE_SECONDS`.
+```text
+handlers/      Telegram handlers
+middlewares/   middleware для БД, метрик и контекста
+utils/         API-клиент, клавиатуры, форматтеры, события, timezone helpers
+tests/         pytest-тесты
+data/          runtime SQLite база и backup-архивы
+main.py        точка входа
+database.py    слой работы с SQLite
+scheduler.py   фоновые jobs
+config.py      конфигурация и дефолты
+```
+

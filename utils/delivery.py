@@ -11,7 +11,9 @@ from aiogram.types import InlineKeyboardMarkup, Message
 class PendingDelivery:
     kind: str
     chat_id: int
-    text: str
+    text: str = ""
+    media_type: str = ""
+    media_file_id: str = ""
     reply_markup: InlineKeyboardMarkup | None = None
     parse_mode: str = "HTML"
     disable_web_page_preview: bool = True
@@ -75,13 +77,38 @@ delivery_queue = DeliveryQueue()
 
 async def send_delivery(bot: Bot, item: PendingDelivery) -> DeliveryResult:
     try:
-        await bot.send_message(
-            item.chat_id,
-            item.text,
-            parse_mode=item.parse_mode,
-            reply_markup=item.reply_markup,
-            disable_web_page_preview=item.disable_web_page_preview,
-        )
+        if item.media_type == "photo":
+            await bot.send_photo(
+                item.chat_id,
+                item.media_file_id,
+                caption=item.text or None,
+                parse_mode=item.parse_mode,
+                reply_markup=item.reply_markup,
+            )
+        elif item.media_type == "video":
+            await bot.send_video(
+                item.chat_id,
+                item.media_file_id,
+                caption=item.text or None,
+                parse_mode=item.parse_mode,
+                reply_markup=item.reply_markup,
+            )
+        elif item.media_type == "document":
+            await bot.send_document(
+                item.chat_id,
+                item.media_file_id,
+                caption=item.text or None,
+                parse_mode=item.parse_mode,
+                reply_markup=item.reply_markup,
+            )
+        else:
+            await bot.send_message(
+                item.chat_id,
+                item.text,
+                parse_mode=item.parse_mode,
+                reply_markup=item.reply_markup,
+                disable_web_page_preview=item.disable_web_page_preview,
+            )
         return DeliveryResult(status="success")
 
     except TelegramForbiddenError:

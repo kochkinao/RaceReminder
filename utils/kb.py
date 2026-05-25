@@ -12,6 +12,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import DEFAULT_SERIES_NAMES, POPULAR_TIMEZONES
 from utils.i18n import DEFAULT_UI_LANG, UI_LANGUAGE_OPTIONS, tr
+from utils.formatters import display_series_name, display_subject_icon
 
 if TYPE_CHECKING:
     from utils.rscg import RscgStage
@@ -101,11 +102,23 @@ class QualToggleCD(CallbackData, prefix="qual"):
     value:  int
 
 
-class SubNotifyCD(CallbackData, prefix="subnotify"):
+class SubNotifyCD(CallbackData, prefix="sn"):
     action: str
     type: str
     ref_id: str
     field: str = ""
+
+
+class EventActionCD(CallbackData, prefix="ea"):
+    action: str
+    event_key: str
+    session_id: str = ""
+    source: str = ""
+
+
+class EventViewCD(CallbackData, prefix="eventview"):
+    event_key: str
+    source: str = ""
 
 
 class RscgCD(CallbackData, prefix="rscg"):
@@ -116,10 +129,10 @@ class RscgCD(CallbackData, prefix="rscg"):
 # ── Static keyboards ──────────────────────────────────────────────────────────
 
 def ui_language_picker() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label, callback_data=f"ui_lang:{lang}")]
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=label, callback_data=f"ui_lang:{lang}")
         for label, lang in UI_LANGUAGE_OPTIONS
-    ])
+    ]])
 
 
 def profile_ui_language_picker(current: str, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
@@ -146,10 +159,13 @@ def main_menu(lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text=tr(lang, "menu.knowledge_base"), callback_data="kb_menu"),
+            InlineKeyboardButton(text=tr(lang, "menu.help"), callback_data="help"),
+        ],
+        [
+            InlineKeyboardButton(text=tr(lang, "menu.not_interesting"), callback_data="ignored_events"),
             InlineKeyboardButton(text=tr(lang, "menu.favorites"), callback_data="favorites"),
         ],
         [
-            InlineKeyboardButton(text=tr(lang, "menu.help"), callback_data="help"),
             InlineKeyboardButton(text=tr(lang, "menu.profile"), callback_data="profile_menu"),
         ],
     ])
@@ -197,7 +213,7 @@ def rscg_list_kb(
         text=tr(lang, "menu.unsubscribe") if is_subscribed else tr(lang, "menu.subscribe"),
         callback_data=RscgCD(action="unsub" if is_subscribed else "sub").pack(),
     )])
-    rows.append([InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data="main_menu")])
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.back_to_subscriptions"), callback_data="subs_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -324,7 +340,7 @@ _POPULAR_SERIES_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("Formula 1", ("formula 1",)),
     ("MotoGP", ("motogp",)),
     ("World Endurance Championship", ("world endurance championship",)),
-    ("IMSA", ("imsa weathertech sportscar championship", "imsa sportscar championship")),
+    ("IMSA", ("imsa weathertech sportscar championship", "imsa sportscar championship", "imsa")),
 ]
 
 
@@ -946,6 +962,12 @@ def timezone_picker(page: int = 0, lang: str = DEFAULT_UI_LANG) -> InlineKeyboar
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def timezone_matches_picker(matches: list[str], lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=f"🕐 {tz}", callback_data=f"tz:{tz}")] for tz in matches[:6]]
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.enter_manually"), callback_data="tz:manual")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def series_list(
     all_series:    list[dict],
     subscribed_ids: set[str],
@@ -961,11 +983,11 @@ def series_list(
     for s in chunk:
         check = "✅ " if s["id"] in subscribed_ids else ""
         btns.append([
-            InlineKeyboardButton(
-                text=f"{check}{s.get('name','?')[:38]}",
-                callback_data=SubToggleCD(
-                    type="series",
-                    ref_id=s["id"],
+                InlineKeyboardButton(
+                    text=f"{check}{display_subject_icon(s.get('name','?'), 'series')} {display_series_name(s.get('name','?'))[:35]}",
+                    callback_data=SubToggleCD(
+                        type="series",
+                        ref_id=s["id"],
                     page=page,
                     group=series_group_to_callback(group),
                     subgroup=subgroup,
@@ -1042,17 +1064,48 @@ def class_list(
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
 
-def session_actions(session_id: str, is_fav: bool, lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
+def session_actions(
+    session_id: str,
+    event_key: str,
+    is_fav: bool,
+    is_ignored: bool,
+    lang: str = DEFAULT_UI_LANG,
+) -> InlineKeyboardMarkup:
     fav_text = tr(lang, "menu.favorite_remove") if is_fav else tr(lang, "menu.favorite_add")
-    fav_action = "remove" if is_fav else "add"
+    fav_action = "r" if is_fav else "a"
+    ignore_text = tr(lang, "menu.track_again") if is_ignored else tr(lang, "menu.not_interesting")
+    ignore_action = "u" if is_ignored else "i"
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
             text=fav_text,
-            callback_data=FavCD(action=fav_action, session_id=session_id).pack(),
+            callback_data=EventActionCD(action=fav_action, event_key=event_key, session_id=session_id).pack(),
         ),
         InlineKeyboardButton(
-            text=tr(lang, "menu.remind"),
-            callback_data=RemindCD(action="menu", session_id=session_id).pack(),
+            text=ignore_text,
+            callback_data=EventActionCD(action=ignore_action, event_key=event_key, session_id=session_id).pack(),
+        ),
+    ]])
+
+
+def notification_actions(
+    session_id: str,
+    event_key: str,
+    is_fav: bool,
+    is_ignored: bool,
+    lang: str = DEFAULT_UI_LANG,
+) -> InlineKeyboardMarkup:
+    fav_text = tr(lang, "menu.favorite_remove") if is_fav else tr(lang, "menu.favorite_add")
+    fav_action = "r" if is_fav else "a"
+    ignore_text = tr(lang, "menu.track_again") if is_ignored else tr(lang, "menu.not_interesting")
+    ignore_action = "u" if is_ignored else "i"
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=fav_text,
+            callback_data=EventActionCD(action=fav_action, event_key=event_key, session_id=session_id).pack(),
+        ),
+        InlineKeyboardButton(
+            text=ignore_text,
+            callback_data=EventActionCD(action=ignore_action, event_key=event_key, session_id=session_id).pack(),
         ),
     ]])
 
@@ -1156,7 +1209,7 @@ def history_pick_menu(
         count = counts.get((filter_type, item["ref_id"]), 0) if counts else 0
         count_text = f" · {count}" if count else ""
         rows.append([InlineKeyboardButton(
-            text=f"{item.get('ref_name', item.get('name', '?'))[:48]}{count_text}",
+            text=f"{display_subject_icon(item.get('ref_name', item.get('name', '?')), filter_type) } {display_series_name(item.get('ref_name', item.get('name', '?')))[:45]}{count_text}",
             callback_data=HistoryViewCD(
                 filter_type=filter_type,
                 ref_id=item["ref_id"],
@@ -1192,11 +1245,11 @@ def digest_pick_menu(
         callback_data=DigestViewCD(kind=kind, action="view", scope="all", page=0, pick_page=page).pack(),
     )]]
     for sub in chunk:
-        kind_icon = "🏎️" if sub["type"] == "series" else "🏷️"
+        kind_icon = display_subject_icon(sub["ref_name"], sub["type"])
         count = counts.get((sub["type"], sub["ref_id"]), 0) if counts else 0
         count_text = f" · {count}" if count else ""
         rows.append([InlineKeyboardButton(
-            text=f"{kind_icon} {sub['ref_name'][:42]}{count_text}",
+            text=f"{kind_icon} {display_series_name(sub['ref_name'])[:42]}{count_text}",
             callback_data=DigestViewCD(
                 kind=kind,
                 action="view",
@@ -1441,15 +1494,44 @@ def kb_group_menu(
 
 
 def subscriptions_notify_list(subs: list[dict], lang: str = DEFAULT_UI_LANG) -> InlineKeyboardMarkup:
-    rows = []
+    qual_values = [bool(sub.get("qualifying_notify", 1)) for sub in subs]
+    practice_values = [bool(sub.get("practice_notify", 1)) for sub in subs]
+    all_qual_enabled = bool(qual_values) and all(qual_values)
+    none_qual_enabled = not any(qual_values)
+    all_practice_enabled = bool(practice_values) and all(practice_values)
+    none_practice_enabled = not any(practice_values)
+
+    qual_text = (
+        f"✅ {tr(lang, 'menu.all_qualifying')}"
+        if all_qual_enabled else
+        f"❌ {tr(lang, 'menu.all_qualifying')}"
+        if none_qual_enabled else
+        f"◐ {tr(lang, 'menu.all_qualifying')}"
+    )
+    practice_text = (
+        f"✅ {tr(lang, 'menu.all_practice')}"
+        if all_practice_enabled else
+        f"❌ {tr(lang, 'menu.all_practice')}"
+        if none_practice_enabled else
+        f"◐ {tr(lang, 'menu.all_practice')}"
+    )
+    rows = [[
+        InlineKeyboardButton(
+            text=qual_text,
+            callback_data=f"subs_notify_bulk:qualifying_notify:{0 if all_qual_enabled else 1}",
+        ),
+        InlineKeyboardButton(
+            text=practice_text,
+            callback_data=f"subs_notify_bulk:practice_notify:{0 if all_practice_enabled else 1}",
+        ),
+    ]]
     for sub in subs:
-        kind = "🏎️" if sub["type"] == "series" else "🏷️"
         rows.append([InlineKeyboardButton(
-            text=f"{kind} {sub['ref_name']}",
+            text=f"{display_subject_icon(sub['ref_name'], sub['type'])} {display_series_name(sub['ref_name'])}",
             callback_data=SubNotifyCD(
-                action="open",
-                type=sub["type"],
-                ref_id=sub["ref_id"][:8],
+                action="o",
+                type="s" if sub["type"] == "series" else "c",
+                ref_id=sub["ref_id"],
             ).pack(),
         )])
     rows.append([InlineKeyboardButton(text=tr(lang, "menu.back"), callback_data="profile_menu")])
@@ -1464,20 +1546,66 @@ def subscription_notify_menu(sub: dict, lang: str = DEFAULT_UI_LANG) -> InlineKe
         [InlineKeyboardButton(
             text=f"{icon('qualifying_notify')} {tr(lang, 'menu.qualifying')}",
             callback_data=SubNotifyCD(
-                action="toggle",
-                type=sub["type"],
-                ref_id=sub["ref_id"][:8],
-                field="qualifying_notify",
+                action="t",
+                type="s" if sub["type"] == "series" else "c",
+                ref_id=sub["ref_id"],
+                field="q",
             ).pack(),
         )],
         [InlineKeyboardButton(
             text=f"{icon('practice_notify')} {tr(lang, 'menu.qualifying_and_tests')}",
             callback_data=SubNotifyCD(
-                action="toggle",
-                type=sub["type"],
-                ref_id=sub["ref_id"][:8],
-                field="practice_notify",
+                action="t",
+                type="s" if sub["type"] == "series" else "c",
+                ref_id=sub["ref_id"],
+                field="p",
             ).pack(),
         )],
         [InlineKeyboardButton(text=tr(lang, "menu.back_to_list"), callback_data="subs:notify")],
+    ])
+
+
+def event_list_menu(
+    events: list[dict],
+    *,
+    empty_text_key: str,
+    back_callback: str = "main_menu",
+    lang: str = DEFAULT_UI_LANG,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if not events:
+        rows.append([InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data=back_callback)])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    for event in events:
+        rows.append([InlineKeyboardButton(
+            text=event["title"][:56],
+            callback_data=EventViewCD(event_key=event["event_key"]).pack(),
+        )])
+    rows.append([InlineKeyboardButton(text=tr(lang, "menu.back_to_menu"), callback_data=back_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def event_actions(
+    event_key: str,
+    is_favorite: bool,
+    is_ignored: bool,
+    lang: str = DEFAULT_UI_LANG,
+    back_callback: str = "main_menu",
+    source: str = "",
+) -> InlineKeyboardMarkup:
+    favorite_action = "r" if is_favorite else "a"
+    ignore_action = "u" if is_ignored else "i"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=tr(lang, "menu.favorite_remove") if is_favorite else tr(lang, "menu.favorite_add"),
+                callback_data=EventActionCD(action=favorite_action, event_key=event_key, source=source).pack(),
+            ),
+            InlineKeyboardButton(
+                text=tr(lang, "menu.track_again") if is_ignored else tr(lang, "menu.not_interesting"),
+                callback_data=EventActionCD(action=ignore_action, event_key=event_key, source=source).pack(),
+            ),
+        ],
+        [InlineKeyboardButton(text=tr(lang, "menu.back"), callback_data=back_callback)],
     ])

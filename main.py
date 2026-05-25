@@ -42,7 +42,7 @@ async def main() -> None:
     # ── 1. Logging ────────────────────────────────────────────────────────────
     admin_handler = setup_logging(LOG_LEVEL, ADMIN_IDS)
     log = logging.getLogger(__name__)
-    log.info("Starting RaceDay Bot")
+    log.info("Starting RaceReminder Bot")
 
     # ── 2. Infrastructure ─────────────────────────────────────────────────────
     db      = Database()
@@ -98,7 +98,7 @@ async def main() -> None:
         try:
             await bot.send_message(
                 admin_id,
-                "✅ <b>RaceDay Bot запущен</b>\n"
+                "✅ <b>RaceReminder Bot запущен</b>\n"
                 f"L1 записей: {mem.size()}",
                 parse_mode="HTML",
             )
@@ -114,7 +114,7 @@ async def main() -> None:
         # Alert admins about shutdown
         for admin_id in ADMIN_IDS:
             try:
-                await bot.send_message(admin_id, "🔴 <b>RaceDay Bot остановлен</b>", parse_mode="HTML")
+                await bot.send_message(admin_id, "🔴 <b>RaceReminder Bot остановлен</b>", parse_mode="HTML")
             except Exception:
                 pass
 

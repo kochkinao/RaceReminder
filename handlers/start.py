@@ -7,13 +7,23 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 import utils
-from config import DEFAULT_VEHICLE_CLASS_NAMES
+from config import DEFAULT_ONBOARDING_SERIES_NAMES, DEFAULT_VEHICLE_CLASS_NAMES
 from database import Database
 from utils.cache import MemoryCache
 from states import OnboardingStates
 
 log = logging.getLogger(__name__)
 router = Router()
+
+
+def _is_onboarding_default_series(name: str) -> bool:
+    lowered = (name or "").strip().lower()
+    return (
+        lowered == "formula 1"
+        or "world endurance championship" in lowered
+        or lowered.startswith("imsa ")
+        or lowered == "imsa"
+    )
 
 
 async def _main_menu_text(db: Database, chat_id: int, lang: str) -> str:
@@ -105,6 +115,7 @@ async def cb_tz_chosen(
         await callback.answer()
         return
     await db.update_user(callback.from_user.id, timezone=tz)
+    await state.clear()
     await _finish_onboarding(callback.message, state, db, mem, runtime_state)
     await callback.answer()
 
@@ -113,20 +124,24 @@ async def cb_tz_chosen(
 async def msg_tz_manual(
     message: Message, state: FSMContext, db: Database, mem: MemoryCache, runtime_state
 ) -> None:
-    import pytz
     user = await db.get_or_create_user(message.chat.id, message.from_user.username)
     lang = utils.get_ui_lang(user)
     tz_input = message.text.strip()
-    try:
-        pytz.timezone(tz_input)
-    except Exception:
+    matches = utils.resolve_timezone_input(tz_input)
+    if not matches:
         await message.answer(
             utils.tr(lang, "error.unknown_timezone", value=escape(tz_input)),
             parse_mode="HTML",
             reply_markup=utils.timezone_picker(lang=lang),
         )
         return
-    await db.update_user(message.chat.id, timezone=tz_input)
+    if len(matches) > 1:
+        await message.answer(
+            utils.tr(lang, "profile.ambiguous_timezone"),
+            reply_markup=utils.timezone_matches_picker(matches, lang=lang),
+        )
+        return
+    await db.update_user(message.chat.id, timezone=matches[0])
     await _finish_onboarding(message, state, db, mem, runtime_state)
 
 
@@ -141,13 +156,26 @@ async def _finish_onboarding(
 
     subscribed: list[str] = []
     try:
-        popular_series = utils.filter_series_by_group(
-            await utils.get_all_series(mem, db, runtime_state.http_session),
-            "popular",
+        all_series = await utils.get_all_series(mem, db, runtime_state.http_session)
+        onboarding_series = [s for s in all_series if _is_onboarding_default_series(s.get("name", ""))]
+        onboarding_series.sort(
+            key=lambda item: next(
+                (
+                    idx for idx, label in enumerate(DEFAULT_ONBOARDING_SERIES_NAMES)
+                    if (
+                        label == "Formula 1" and item.get("name", "") == "Formula 1"
+                    ) or (
+                        label == "FIA World Endurance Championship" and "world endurance championship" in item.get("name", "").lower()
+                    ) or (
+                        label == "IMSA" and item.get("name", "").lower().startswith("imsa")
+                    )
+                ),
+                999,
+            )
         )
-        for s in popular_series:
+        for s in onboarding_series:
             await db.add_subscription(chat_id, "series", s["id"], s.get("name", ""))
-            subscribed.append(s["name"])
+            subscribed.append(utils.display_series_name(s["name"]))
         if not subscribed:
             for vc in await utils.get_all_vehicle_classes(mem, db, runtime_state.http_session):
                 if vc.get("name") in DEFAULT_VEHICLE_CLASS_NAMES:

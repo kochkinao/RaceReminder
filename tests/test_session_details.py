@@ -40,3 +40,30 @@ async def test_load_session_context_merges_windows_and_deduplicates(monkeypatch)
     assert session == target_session
     assert len(broadcasts) == 1
     assert live_timings == [{"description": "Live", "url": "https://example.com"}]
+
+
+async def test_migrate_legacy_favorites_to_event_level() -> None:
+    class FakeDb:
+        def __init__(self) -> None:
+            self.saved: list[tuple[int, str, str, int]] = []
+
+        async def get_favorites(self, chat_id: int):
+            return [{"session_id": "session-42"}]
+
+        async def add_event_favorite(self, chat_id: int, event_key: str, title: str, sort_ts: int):
+            self.saved.append((chat_id, event_key, title, sort_ts))
+
+    fake_db = FakeDb()
+    await session_details._migrate_legacy_favorites(
+        1001,
+        fake_db,
+        {
+            "session-42": {
+                "event_key": "event-42",
+                "title": "Formula Test · Imola · 01.06.2026",
+                "sort_ts": 1234,
+            }
+        },
+    )
+
+    assert fake_db.saved == [(1001, "event-42", "Formula Test · Imola · 01.06.2026", 1234)]

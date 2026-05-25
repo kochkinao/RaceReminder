@@ -110,6 +110,9 @@ async def test_notifications_job_uses_each_users_ui_language(monkeypatch) -> Non
         async def get_all_sent_notifications(self):
             return set()
 
+        async def get_ignored_events(self, chat_id: int, now_ts: int):
+            return []
+
     class FakeState:
         http_session = None
 
@@ -153,6 +156,9 @@ async def test_notifications_job_uses_each_users_ui_language(monkeypatch) -> Non
     async def fake_get_broadcasts(mem, db, http_session, start):
         return []
 
+    async def fake_get_live_timings(session_id, http_session=None):
+        return [{"description": "Live Timing", "url": "https://example.com/live"}]
+
     async def fake_process_delivery(bot, db, metrics, item, *, allow_queue):
         sent_texts.append(item.text)
         return True
@@ -160,6 +166,7 @@ async def test_notifications_job_uses_each_users_ui_language(monkeypatch) -> Non
     monkeypatch.setattr(scheduler.time, "time", lambda: fixed_now)
     monkeypatch.setattr(scheduler.utils, "get_sessions", fake_get_sessions)
     monkeypatch.setattr(scheduler.utils, "get_broadcasts", fake_get_broadcasts)
+    monkeypatch.setattr(scheduler.utils, "get_live_timings", fake_get_live_timings)
     monkeypatch.setattr(scheduler.utils, "broadcasts_by_session", lambda rows: {})
     monkeypatch.setattr(scheduler, "_process_delivery", fake_process_delivery)
     monkeypatch.setattr(scheduler.utils.delivery_queue, "has", lambda _key: False)

@@ -15,14 +15,17 @@ Scheduler jobs:
 import asyncio
 import json
 import logging
+from pathlib import Path
 import time
 from datetime import datetime, time as dt_time, timedelta, timezone
+import zipfile
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram import Bot
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 import pytz
 
+from config import ADMIN_IDS, DATABASE_PATH
 from database import Database
 from utils.cache import MemoryCache
 from utils.health import RuntimeState
@@ -100,6 +103,12 @@ def make_scheduler(
         args=(bot, db, mem, metrics, state),
         trigger="cron", hour="*", minute=10,
         id="rscg_notifications", replace_existing=True, **grace,
+    )
+    scheduler.add_job(
+        _admin_backup_job,
+        args=(bot, db, state),
+        trigger="cron", hour=1, minute=30,
+        id="admin_backup", replace_existing=True, **grace,
     )
 
     return scheduler
@@ -398,6 +407,7 @@ async def _session_reminders_job(
             f"{labels.get(row['remind_type'], '🔔 Session reminder' if ui_lang == 'en' else '🔔 Напоминание по сессии')}\n\n"
             f"{utils.session_card(session, broadcasts, live_timings, user['timezone'], user_langs, ui_lang=ui_lang) or session.get('name', 'Session' if ui_lang == 'en' else 'Сессия')}"
         )
+        event_identity = utils.build_event_identity(session, ui_lang)
         dedupe_key = ("session_reminder", chat_id, session_id, row["remind_type"])
         if utils.delivery_queue.has(dedupe_key):
             continue
@@ -405,9 +415,7 @@ async def _session_reminders_job(
             kind="session_reminder",
             chat_id=chat_id,
             text=text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="📋 Details" if ui_lang == "en" else "📋 Подробнее", callback_data=f"session:{session_id}"),
-            ]]),
+            reply_markup=utils.notification_actions(session_id, event_identity.key, False, False, ui_lang),
             dedupe_key=dedupe_key,
             session_id=session_id,
             remind_type=row["remind_type"],
@@ -444,6 +452,7 @@ async def _notifications_job(
         return
 
     bc_map = utils.broadcasts_by_session(all_broadcasts)
+    session_event_map = utils.map_sessions_to_events(all_sessions)
 
     # ── One DB round-trip for everyone ────────────────────────────────────────
     all_users  = await db.get_all_users(active_only=True)
@@ -454,13 +463,18 @@ async def _notifications_job(
     series_idx, class_idx = _build_session_index(all_sessions)
 
     # ── Accumulate new notifications to batch-write ───────────────────────────
-    to_send: list[tuple[Row, Row, str, list, list[str], str]] = []
+    to_send: list[tuple[Row, Row, str, list, list[dict], list[str], str, dict]] = []
 
+    live_timings_cache: dict[str, list[dict]] = {}
     for user in all_users:
         chat_id    = user["chat_id"]
         subs       = all_subs.get(chat_id, [])
         if not subs:
             continue
+        ignored_keys = {
+            row["event_key"]
+            for row in await db.get_ignored_events(chat_id, now)
+        }
 
         series_ids = {s["ref_id"] for s in subs if s["type"] == "series"}
         class_ids  = {s["ref_id"] for s in subs if s["type"] == "vehicle_class"}
@@ -475,6 +489,10 @@ async def _notifications_job(
             sid      = session.get("id", "")
             start_ts = session.get("start", 0)
             if not start_ts:
+                continue
+            event = session_event_map.get(sid)
+            event_key = event["event_key"] if event else utils.build_event_identity(session, ui_lang).key
+            if event_key in ignored_keys:
                 continue
 
             for notif_type, offset in NOTIFICATION_OFFSETS.items():
@@ -496,14 +514,34 @@ async def _notifications_job(
                 if not user.get("show_no_broadcast", 1) and not bc_map.get(sid):
                     continue
 
-                to_send.append((user, session, notif_type, bc_map.get(sid, []), user_langs, ui_lang))
+                if sid not in live_timings_cache:
+                    try:
+                        live_timings_cache[sid] = await utils.get_live_timings(sid, state.http_session)
+                    except Exception as exc:
+                        log.warning("Live timings fetch failed for %s: %s", sid, exc)
+                    live_timings_cache[sid] = []
+
+                to_send.append((
+                    user,
+                    session,
+                    notif_type,
+                    bc_map.get(sid, []),
+                    live_timings_cache[sid],
+                    user_langs,
+                    ui_lang,
+                    event or {
+                        "event_key": event_key,
+                        "title": utils.build_event_identity(session, ui_lang).title,
+                        "sort_ts": int(session.get("start", 0) or 0),
+                    },
+                ))
                 sent_set.add(key)  # prevent duplicates within same run
 
     log.info("Notifications to send: %d", len(to_send))
 
     # ── Send with retries / queue fallback ────────────────────────────────────
     sent_count = 0
-    for queued_user, session, notif_type, broadcasts, user_langs, ui_lang in to_send:
+    for queued_user, session, notif_type, broadcasts, live_timings, user_langs, ui_lang, event in to_send:
         chat_id = queued_user["chat_id"]
         user = users_by_chat_id.get(chat_id)
         if not user:
@@ -512,16 +550,14 @@ async def _notifications_job(
         text = utils.notification_text(
             session,
             broadcasts=broadcasts,
-            live_timings=[],
+            live_timings=live_timings,
             user_tz=user["timezone"],
             user_langs=user_langs,
             notif_type=notif_type,
             ui_lang=ui_lang,
         )
         sid = session.get("id", "")
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="📋 Details" if ui_lang == "en" else "📋 Подробнее", callback_data=f"session:{sid}"),
-        ]])
+        kb = utils.notification_actions(sid, event["event_key"], False, False, ui_lang)
         dedupe_key = ("notification", chat_id, sid, notif_type)
         if utils.delivery_queue.has(dedupe_key):
             continue
@@ -754,5 +790,39 @@ async def _weekly_digest_job(
 async def _db_cleanup_job(db: Database, state: RuntimeState) -> None:
     started_at = time.time()
     deleted = await db.cleanup_old_notifications()
+    deleted += await db.cleanup_expired_ignored_events(int(started_at))
     state.mark_job_success("db_cleanup", int((time.time() - started_at) * 1000))
     log.info("DB cleanup: %d old sent_notifications removed", deleted)
+
+
+async def _admin_backup_job(bot: Bot, db: Database, state: RuntimeState) -> None:
+    started_at = time.time()
+    if not ADMIN_IDS:
+        state.mark_job_success("admin_backup", int((time.time() - started_at) * 1000))
+        return
+
+    backup_dir = Path(DATABASE_PATH).parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / f"raceday-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.db"
+    archive_path = backup_path.with_suffix(".zip")
+    try:
+        await db.export_backup(str(backup_path))
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(backup_path, arcname=backup_path.name)
+
+        document = FSInputFile(str(archive_path), filename=archive_path.name)
+        caption = f"Daily DB backup ZIP · {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}"
+        for admin_id in ADMIN_IDS:
+            await bot.send_document(admin_id, document=document, caption=caption)
+            await asyncio.sleep(TELEGRAM_SEND_DELAY)
+        state.mark_job_success("admin_backup", int((time.time() - started_at) * 1000))
+    except Exception as exc:
+        state.mark_job_failure("admin_backup", str(exc), int((time.time() - started_at) * 1000))
+        log.error("Admin backup failed: %s", exc)
+    finally:
+        for path in (backup_path, archive_path):
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception as cleanup_exc:
+                log.warning("Backup cleanup failed for %s: %s", path, cleanup_exc)

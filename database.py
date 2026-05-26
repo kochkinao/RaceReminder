@@ -11,15 +11,20 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from typing import Any
+import time
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
 from config import ALLOWED_USER_FIELDS, DATABASE_PATH, SENT_NOTIFICATIONS_TTL_DAYS
 
+if TYPE_CHECKING:
+    from utils.delivery import PendingDelivery
+
 log = logging.getLogger(__name__)
 
 Row = dict[str, Any]
+LATEST_SCHEMA_VERSION = 3
 
 
 class Database:
@@ -38,8 +43,7 @@ class Database:
             PRAGMA mmap_size      = 268435456;
         """)
         await self._create_tables()
-        await self._migrate_users_schema()
-        await self._migrate_subscriptions_schema()
+        await self._run_migrations()
 
     async def close(self) -> None:
         if self._db:
@@ -142,6 +146,20 @@ class Database:
                 payload    TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS pending_deliveries (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                dedupe_key      TEXT UNIQUE,
+                payload         TEXT NOT NULL,
+                next_attempt_at REAL NOT NULL,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_subs_chat  ON subscriptions(chat_id);
             CREATE INDEX IF NOT EXISTS idx_sent_chat  ON sent_notifications(chat_id);
             CREATE INDEX IF NOT EXISTS idx_sent_ts    ON sent_notifications(sent_at);
@@ -151,6 +169,7 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_reminders_due ON session_reminders(remind_at_ts);
             CREATE INDEX IF NOT EXISTS idx_log_type   ON event_log(event_type);
             CREATE INDEX IF NOT EXISTS idx_log_chat   ON event_log(chat_id);
+            CREATE INDEX IF NOT EXISTS idx_pending_due ON pending_deliveries(next_attempt_at);
         """)
         await self._db.commit()
 
@@ -174,7 +193,29 @@ class Database:
             rows = await cur.fetchall()
             return [dict(r) for r in rows]
 
-    async def _migrate_users_schema(self) -> None:
+    async def _schema_version(self) -> int:
+        row = await self._fetchone("SELECT version FROM schema_version LIMIT 1")
+        return int(row["version"]) if row else 0
+
+    async def _set_schema_version(self, version: int) -> None:
+        await self._db.execute("DELETE FROM schema_version")
+        await self._db.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+        await self._db.commit()
+
+    async def _run_migrations(self) -> None:
+        current = await self._schema_version()
+        migrations = {
+            1: self._migration_001_users_profile_flags,
+            2: self._migration_002_subscription_notify_fields,
+            3: self._migration_003_pending_deliveries,
+        }
+        while current < LATEST_SCHEMA_VERSION:
+            next_version = current + 1
+            await migrations[next_version]()
+            await self._set_schema_version(next_version)
+            current = next_version
+
+    async def _migration_001_users_profile_flags(self) -> None:
         rows = await self._fetchall("PRAGMA table_info(users)")
         columns = {row["name"] for row in rows}
 
@@ -195,7 +236,7 @@ class Database:
 
         await self._db.commit()
 
-    async def _migrate_subscriptions_schema(self) -> None:
+    async def _migration_002_subscription_notify_fields(self) -> None:
         rows = await self._fetchall("PRAGMA table_info(subscriptions)")
         columns = {row["name"] for row in rows}
 
@@ -221,6 +262,25 @@ class Database:
 
         await self._db.commit()
 
+    async def _migration_003_pending_deliveries(self) -> None:
+        await self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_deliveries (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                dedupe_key      TEXT UNIQUE,
+                payload         TEXT NOT NULL,
+                next_attempt_at REAL NOT NULL,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_due ON pending_deliveries(next_attempt_at)"
+        )
+        await self._db.commit()
+
     # ── Users ─────────────────────────────────────────────────────────────────
 
     async def user_exists(self, chat_id: int) -> bool:
@@ -237,11 +297,13 @@ class Database:
         )
 
     async def create_user(self, chat_id: int, username: str | None = None) -> Row:
-        await self._execute(
+        cur = await self._db.execute(
             "INSERT OR IGNORE INTO users (chat_id, username) VALUES (?, ?)",
             (chat_id, username),
         )
-        await self.log_event("user_created", chat_id)
+        await self._db.commit()
+        if cur.rowcount:
+            await self.log_event("user_created", chat_id)
         return await self._fetchone("SELECT * FROM users WHERE chat_id=?", (chat_id,))
 
     async def get_or_create_user(self, chat_id: int, username: str | None = None) -> Row:
@@ -254,10 +316,32 @@ class Database:
         bad = set(fields) - ALLOWED_USER_FIELDS
         if bad:
             raise ValueError(f"update_user: disallowed fields: {bad}")
-        sets = ", ".join(f"{k}=?" for k in fields)
+        if not fields:
+            return
+        current = await self.get_user(chat_id)
+        if not current:
+            raise ValueError(f"user not found: {chat_id}")
+        changed = {
+            key: value
+            for key, value in fields.items()
+            if current.get(key) != value
+        }
+        if not changed:
+            return
+        sets = ", ".join(f"{k}=?" for k in changed)
         await self._execute(
             f"UPDATE users SET {sets}, last_seen_at=datetime('now') WHERE chat_id=?",
-            (*fields.values(), chat_id),
+            (*changed.values(), chat_id),
+        )
+        await self.log_event(
+            "user_settings_updated",
+            chat_id,
+            {
+                "changes": {
+                    key: {"old": current.get(key), "new": value}
+                    for key, value in changed.items()
+                }
+            },
         )
 
     async def touch_user(self, chat_id: int) -> None:
@@ -341,16 +425,30 @@ class Database:
     async def add_subscription(
         self, chat_id: int, type_: str, ref_id: str, ref_name: str
     ) -> None:
-        await self._execute(
+        cur = await self._db.execute(
             "INSERT OR IGNORE INTO subscriptions (chat_id, type, ref_id, ref_name) VALUES (?,?,?,?)",
             (chat_id, type_, ref_id, ref_name),
         )
+        await self._db.commit()
+        if cur.rowcount:
+            await self.log_event(
+                "subscription_added",
+                chat_id,
+                {"type": type_, "ref_id": ref_id, "ref_name": ref_name},
+            )
 
     async def remove_subscription(self, chat_id: int, type_: str, ref_id: str) -> None:
-        await self._execute(
+        cur = await self._db.execute(
             "DELETE FROM subscriptions WHERE chat_id=? AND type=? AND ref_id=?",
             (chat_id, type_, ref_id),
         )
+        await self._db.commit()
+        if cur.rowcount:
+            await self.log_event(
+                "subscription_removed",
+                chat_id,
+                {"type": type_, "ref_id": ref_id},
+            )
 
     async def remove_all_subscriptions(self, chat_id: int) -> None:
         await self._execute(
@@ -367,10 +465,35 @@ class Database:
     ) -> None:
         if not fields:
             return
-        sets = ", ".join(f"{k}=?" for k in fields)
+        current = await self._fetchone(
+            "SELECT * FROM subscriptions WHERE chat_id=? AND type=? AND ref_id=?",
+            (chat_id, type_, ref_id),
+        )
+        if not current:
+            return
+        changed = {
+            key: value
+            for key, value in fields.items()
+            if current.get(key) != value
+        }
+        if not changed:
+            return
+        sets = ", ".join(f"{k}=?" for k in changed)
         await self._execute(
             f"UPDATE subscriptions SET {sets} WHERE chat_id=? AND type=? AND ref_id=?",
-            (*fields.values(), chat_id, type_, ref_id),
+            (*changed.values(), chat_id, type_, ref_id),
+        )
+        await self.log_event(
+            "subscription_settings_updated",
+            chat_id,
+            {
+                "type": type_,
+                "ref_id": ref_id,
+                "changes": {
+                    key: {"old": current.get(key), "new": value}
+                    for key, value in changed.items()
+                },
+            },
         )
 
     # ── Batch subscriptions (scheduler) ──────────────────────────────────────
@@ -465,16 +588,36 @@ class Database:
         return row is not None
 
     async def add_event_favorite(self, chat_id: int, event_key: str, title: str, sort_ts: int) -> None:
-        await self._execute(
+        current = await self._fetchone(
+            "SELECT title, sort_ts FROM event_favorites WHERE chat_id=? AND event_key=?",
+            (chat_id, event_key),
+        )
+        if current and current.get("title") == title and current.get("sort_ts") == sort_ts:
+            return
+        cur = await self._db.execute(
             "INSERT OR REPLACE INTO event_favorites (chat_id, event_key, title, sort_ts) VALUES (?,?,?,?)",
             (chat_id, event_key, title, sort_ts),
         )
+        await self._db.commit()
+        if cur.rowcount:
+            await self.log_event(
+                "event_favorite_added",
+                chat_id,
+                {"event_key": event_key, "title": title, "sort_ts": sort_ts},
+            )
 
     async def remove_event_favorite(self, chat_id: int, event_key: str) -> None:
-        await self._execute(
+        cur = await self._db.execute(
             "DELETE FROM event_favorites WHERE chat_id=? AND event_key=?",
             (chat_id, event_key),
         )
+        await self._db.commit()
+        if cur.rowcount:
+            await self.log_event(
+                "event_favorite_removed",
+                chat_id,
+                {"event_key": event_key},
+            )
 
     async def get_ignored_events(self, chat_id: int, now_ts: int | None = None) -> list[Row]:
         sql = "SELECT * FROM ignored_events WHERE chat_id=?"
@@ -502,16 +645,45 @@ class Database:
         sort_ts: int,
         expires_at_ts: int,
     ) -> None:
-        await self._execute(
+        current = await self._fetchone(
+            "SELECT title, sort_ts, expires_at_ts FROM ignored_events WHERE chat_id=? AND event_key=?",
+            (chat_id, event_key),
+        )
+        if current and (
+            current.get("title") == title
+            and current.get("sort_ts") == sort_ts
+            and current.get("expires_at_ts") == expires_at_ts
+        ):
+            return
+        cur = await self._db.execute(
             "INSERT OR REPLACE INTO ignored_events (chat_id, event_key, title, sort_ts, expires_at_ts) VALUES (?,?,?,?,?)",
             (chat_id, event_key, title, sort_ts, expires_at_ts),
         )
+        await self._db.commit()
+        if cur.rowcount:
+            await self.log_event(
+                "event_ignored",
+                chat_id,
+                {
+                    "event_key": event_key,
+                    "title": title,
+                    "sort_ts": sort_ts,
+                    "expires_at_ts": expires_at_ts,
+                },
+            )
 
     async def unignore_event(self, chat_id: int, event_key: str) -> None:
-        await self._execute(
+        cur = await self._db.execute(
             "DELETE FROM ignored_events WHERE chat_id=? AND event_key=?",
             (chat_id, event_key),
         )
+        await self._db.commit()
+        if cur.rowcount:
+            await self.log_event(
+                "event_unignored",
+                chat_id,
+                {"event_key": event_key},
+            )
 
     async def cleanup_expired_ignored_events(self, now_ts: int) -> int:
         async with self._db.execute(
@@ -533,18 +705,42 @@ class Database:
     async def add_session_reminder(
         self, chat_id: int, session_id: str, remind_type: str, remind_at_ts: int
     ) -> None:
-        await self._execute(
+        current = await self._fetchone(
+            "SELECT remind_at_ts FROM session_reminders WHERE chat_id=? AND session_id=? AND remind_type=?",
+            (chat_id, session_id, remind_type),
+        )
+        if current and current.get("remind_at_ts") == remind_at_ts:
+            return
+        cur = await self._db.execute(
             "INSERT OR REPLACE INTO session_reminders (chat_id, session_id, remind_type, remind_at_ts) VALUES (?,?,?,?)",
             (chat_id, session_id, remind_type, remind_at_ts),
         )
+        await self._db.commit()
+        if cur.rowcount:
+            await self.log_event(
+                "session_reminder_added",
+                chat_id,
+                {
+                    "session_id": session_id,
+                    "remind_type": remind_type,
+                    "remind_at_ts": remind_at_ts,
+                },
+            )
 
     async def remove_session_reminder(
         self, chat_id: int, session_id: str, remind_type: str
     ) -> None:
-        await self._execute(
+        cur = await self._db.execute(
             "DELETE FROM session_reminders WHERE chat_id=? AND session_id=? AND remind_type=?",
             (chat_id, session_id, remind_type),
         )
+        await self._db.commit()
+        if cur.rowcount:
+            await self.log_event(
+                "session_reminder_removed",
+                chat_id,
+                {"session_id": session_id, "remind_type": remind_type},
+            )
 
     async def get_due_session_reminders(self, now_ts: int) -> list[Row]:
         return await self._fetchall(
@@ -554,6 +750,97 @@ class Database:
             "ORDER BY sr.remind_at_ts, sr.id",
             (now_ts,),
         )
+
+    # ── Pending deliveries ───────────────────────────────────────────────────
+
+    async def has_pending_delivery(self, dedupe_key: Any) -> bool:
+        from utils.delivery import dedupe_token
+
+        token = dedupe_token(dedupe_key)
+        if token is None:
+            return False
+        row = await self._fetchone(
+            "SELECT 1 FROM pending_deliveries WHERE dedupe_key=?",
+            (token,),
+        )
+        return row is not None
+
+    async def count_pending_deliveries(self) -> int:
+        row = await self._fetchone("SELECT COUNT(*) n FROM pending_deliveries")
+        return row["n"] if row else 0
+
+    async def enqueue_pending_delivery(self, item: "PendingDelivery", delay_seconds: float = 0) -> bool:
+        from utils.delivery import dedupe_token, pending_delivery_payload
+
+        item.next_attempt_at = time.time() + delay_seconds
+        payload = json.dumps(pending_delivery_payload(item), ensure_ascii=False)
+        token = dedupe_token(item.dedupe_key)
+        cur = await self._db.execute(
+            "INSERT OR IGNORE INTO pending_deliveries "
+            "(dedupe_key, payload, next_attempt_at, attempts, last_error) "
+            "VALUES (?,?,?,?,?)",
+            (token, payload, item.next_attempt_at, item.attempts, item.last_error),
+        )
+        await self._db.commit()
+        if cur.rowcount:
+            item.queue_id = cur.lastrowid or 0
+            return True
+        return False
+
+    async def get_due_pending_deliveries(self, now_ts: float | None = None, limit: int = 100) -> list["PendingDelivery"]:
+        from utils.delivery import pending_delivery_from_payload
+
+        when = time.time() if now_ts is None else now_ts
+        rows = await self._fetchall(
+            "SELECT * FROM pending_deliveries WHERE next_attempt_at<=? "
+            "ORDER BY next_attempt_at, id LIMIT ?",
+            (when, limit),
+        )
+        items: list["PendingDelivery"] = []
+        for row in rows:
+            payload = json.loads(row["payload"])
+            items.append(
+                pending_delivery_from_payload(
+                    payload,
+                    queue_id=row["id"],
+                    attempts=int(row.get("attempts", 0) or 0),
+                    next_attempt_at=float(row.get("next_attempt_at", 0) or 0),
+                    last_error=row.get("last_error", ""),
+                )
+            )
+        return items
+
+    async def complete_pending_delivery(self, item: "PendingDelivery") -> None:
+        from utils.delivery import dedupe_token
+
+        if item.queue_id:
+            await self._execute("DELETE FROM pending_deliveries WHERE id=?", (item.queue_id,))
+            return
+        token = dedupe_token(item.dedupe_key)
+        if token is not None:
+            await self._execute("DELETE FROM pending_deliveries WHERE dedupe_key=?", (token,))
+
+    async def requeue_pending_delivery(self, item: "PendingDelivery", delay_seconds: float) -> None:
+        from utils.delivery import dedupe_token, pending_delivery_payload
+
+        item.next_attempt_at = time.time() + delay_seconds
+        payload = json.dumps(pending_delivery_payload(item), ensure_ascii=False)
+        if item.queue_id:
+            await self._execute(
+                "UPDATE pending_deliveries "
+                "SET payload=?, next_attempt_at=?, attempts=?, last_error=? "
+                "WHERE id=?",
+                (payload, item.next_attempt_at, item.attempts, item.last_error, item.queue_id),
+            )
+            return
+        token = dedupe_token(item.dedupe_key)
+        if token is not None:
+            await self._execute(
+                "UPDATE pending_deliveries "
+                "SET payload=?, next_attempt_at=?, attempts=?, last_error=? "
+                "WHERE dedupe_key=?",
+                (payload, item.next_attempt_at, item.attempts, item.last_error, token),
+            )
 
     # ── Event log ─────────────────────────────────────────────────────────────
 

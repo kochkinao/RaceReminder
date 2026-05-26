@@ -14,6 +14,7 @@ import logging
 import traceback
 from collections import deque
 from datetime import datetime, timezone
+from html import escape
 
 _admin_handler: "AdminAlertHandler | None" = None
 
@@ -42,7 +43,7 @@ class AdminAlertHandler(logging.Handler):
             if len(msg) > 800:
                 msg = msg[:800] + "…"
 
-            text = f"🚨 <b>[{lvl}]</b> <code>{ts} UTC</code>\n<pre>{msg}</pre>"
+            text = f"🚨 <b>[{lvl}]</b> <code>{ts} UTC</code>\n<pre>{escape(msg)}</pre>"
             self._queue.append(text)
 
             if self._bot and self._loop and not self._loop.is_closed():

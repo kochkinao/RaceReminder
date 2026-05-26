@@ -8,12 +8,24 @@ class _DummyDb:
     def __init__(self) -> None:
         self.marked = []
         self.deactivated = []
+        self.pending = []
 
     async def mark_notified_batch(self, items):
         self.marked.extend(items)
 
     async def deactivate_user(self, chat_id: int) -> None:
         self.deactivated.append(chat_id)
+
+    async def enqueue_pending_delivery(self, item, delay_seconds: float = 0) -> bool:
+        item.next_attempt_at = delay_seconds
+        self.pending.append(item)
+        return True
+
+    async def count_pending_deliveries(self) -> int:
+        return len(self.pending)
+
+    async def has_pending_delivery(self, dedupe_key) -> bool:
+        return any(item.dedupe_key == dedupe_key for item in self.pending)
 
 
 async def test_delivery_queue_deduplicates_active_keys() -> None:
@@ -45,13 +57,9 @@ async def test_process_delivery_queues_retryable_failures(monkeypatch) -> None:
         return utils.DeliveryResult(status="retry", retry_delay=5, error="temporary")
 
     monkeypatch.setattr(utils, "send_delivery", fake_send_delivery)
-    monkeypatch.setattr(utils.delivery_queue, "_items", [])
-    monkeypatch.setattr(utils.delivery_queue, "_active_keys", set())
 
     ok = await _process_delivery(bot=None, db=db, metrics=metrics, item=item, allow_queue=True)
 
     assert ok is False
-    assert utils.delivery_queue.size() == 1
-    assert utils.delivery_queue.has(("notification", 10, "s1", "1hour")) is True
-    queued = utils.delivery_queue._items.pop()
-    utils.delivery_queue.complete(queued)
+    assert await db.count_pending_deliveries() == 1
+    assert await db.has_pending_delivery(("notification", 10, "s1", "1hour")) is True

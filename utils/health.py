@@ -6,7 +6,7 @@ from typing import Any
 import aiohttp
 
 from utils.cache import MemoryCache
-from utils.delivery import delivery_queue
+from database import Database
 from utils.metrics import Metrics
 from utils.api import fallback_stats
 
@@ -60,6 +60,7 @@ class RuntimeState:
         "session_reminders": JobHealth(),
         "db_cleanup": JobHealth(),
         "rscg_notifications": JobHealth(),
+        "admin_backup": JobHealth(),
     })
 
     def mark_db_connected(self) -> None:
@@ -84,7 +85,7 @@ class RuntimeState:
     def is_ready(self) -> bool:
         return self.db_connected and self.scheduler_started and self.bot_started and self.last_warmup_ok
 
-    def snapshot(self, mem: MemoryCache, metrics: Metrics) -> dict[str, Any]:
+    async def snapshot(self, db: Database, mem: MemoryCache, metrics: Metrics) -> dict[str, Any]:
         return {
             "status": "ready" if self.is_ready() else "starting",
             "started_at": _iso(self.started_at),
@@ -93,7 +94,7 @@ class RuntimeState:
             "scheduler_started": self.scheduler_started,
             "bot_started": self.bot_started,
             "last_warmup_ok": self.last_warmup_ok,
-            "retry_queue_size": delivery_queue.size(),
+            "retry_queue_size": await db.count_pending_deliveries(),
             "api_fallback": fallback_stats(),
             "cache_l1_size": mem.size(),
             "metrics": metrics.summary(),

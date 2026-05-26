@@ -131,6 +131,9 @@ def display_series_name(name: str) -> str:
 def display_subject_icon(name: str, kind: str = "series") -> str:
     normalized = display_series_name(name or "").lower()
 
+    if kind == "vehicle_class":
+        return "🏷️"
+
     if any(token in normalized for token in ("rookies", "junior", "juniors", "academy", "feeder", "f1 academy")):
         return "🧒"
     if any(token in normalized for token in ("motogp", "moto2", "moto3", "superbike", "motocross", "supercross", "motoamerica", "speedway")):
@@ -149,8 +152,6 @@ def display_subject_icon(name: str, kind: str = "series") -> str:
         return "🏎️"
     if any(token in normalized for token in ("formula", "f1", "f2", "f3", "f4", "formula e", "formula regional", "super formula")):
         return "🏎️"
-    if kind == "vehicle_class":
-        return "🏷️"
     return "🏁"
 
 

@@ -1,3 +1,4 @@
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Hashable
@@ -23,8 +24,9 @@ class PendingDelivery:
     remind_type: str = ""
     digest_session_ids: tuple[str, ...] = ()
     attempts: int = 0
-    next_attempt_at: float = field(default_factory=time.monotonic)
+    next_attempt_at: float = field(default_factory=time.time)
     last_error: str = ""
+    queue_id: int = 0
 
 
 @dataclass(slots=True)
@@ -73,6 +75,75 @@ class DeliveryQueue:
 
 
 delivery_queue = DeliveryQueue()
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, list):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_ready(val) for key, val in value.items()}
+    return value
+
+
+def dedupe_token(key: Hashable | None) -> str | None:
+    if key is None:
+        return None
+    return json.dumps(_json_ready(key), ensure_ascii=False, separators=(",", ":"))
+
+
+def pending_delivery_payload(item: PendingDelivery) -> dict[str, Any]:
+    return {
+        "kind": item.kind,
+        "chat_id": item.chat_id,
+        "text": item.text,
+        "media_type": item.media_type,
+        "media_file_id": item.media_file_id,
+        "reply_markup": _markup_payload(item.reply_markup),
+        "parse_mode": item.parse_mode,
+        "disable_web_page_preview": item.disable_web_page_preview,
+        "dedupe_key": _json_ready(item.dedupe_key),
+        "session_id": item.session_id,
+        "notif_type": item.notif_type,
+        "remind_type": item.remind_type,
+        "digest_session_ids": list(item.digest_session_ids),
+    }
+
+
+def pending_delivery_from_payload(
+    payload: dict[str, Any],
+    *,
+    queue_id: int = 0,
+    attempts: int = 0,
+    next_attempt_at: float = 0,
+    last_error: str = "",
+) -> PendingDelivery:
+    markup_payload = payload.get("reply_markup")
+    reply_markup = InlineKeyboardMarkup.model_validate(markup_payload) if markup_payload else None
+    dedupe_key = payload.get("dedupe_key")
+    if isinstance(dedupe_key, list):
+        dedupe_key = tuple(dedupe_key)
+    digest_session_ids = payload.get("digest_session_ids") or ()
+    return PendingDelivery(
+        kind=payload["kind"],
+        chat_id=int(payload["chat_id"]),
+        text=payload.get("text", ""),
+        media_type=payload.get("media_type", ""),
+        media_file_id=payload.get("media_file_id", ""),
+        reply_markup=reply_markup,
+        parse_mode=payload.get("parse_mode", "HTML"),
+        disable_web_page_preview=bool(payload.get("disable_web_page_preview", True)),
+        dedupe_key=dedupe_key,
+        session_id=payload.get("session_id", ""),
+        notif_type=payload.get("notif_type", ""),
+        remind_type=payload.get("remind_type", ""),
+        digest_session_ids=tuple(digest_session_ids),
+        attempts=attempts,
+        next_attempt_at=next_attempt_at,
+        last_error=last_error,
+        queue_id=queue_id,
+    )
 
 
 async def send_delivery(bot: Bot, item: PendingDelivery) -> DeliveryResult:

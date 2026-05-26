@@ -24,7 +24,12 @@ from typing import Any
 
 import aiohttp
 
-from config import API_BASE_URL, API_FALLBACK_STALE_SECONDS
+from config import (
+    API_BASE_URL,
+    API_FALLBACK_STALE_SECONDS,
+    RACEDAY_COOKIE_GA,
+    RACEDAY_COOKIE_GA_QCGJL0F44F,
+)
 from database import Database
 from utils.cache import MemoryCache
 
@@ -40,7 +45,7 @@ _TTL_SESSIONS = 3_600
 _TTL_BCASTS   = 3_600
 
 # ── Transport constants ───────────────────────────────────────────────────────
-_BASE = "https://raceday.watch/api/raceday.v5.RaceDay"
+_BASE = f"{API_BASE_URL.rstrip('/')}/raceday.v5.RaceDay"
 
 _HEADERS = {
     "Accept":       "*/*",
@@ -57,8 +62,8 @@ _HEADERS = {
 
 # Analytics cookies — API validates their presence
 _COOKIES = {
-    "_ga":              "GA1.1.1231997137.1778836345",
-    "_ga_QCGJL0F44F":  "GS2.1.s1778836344$o1$g1$t1778838105$j26$l0$h0",
+    "_ga": RACEDAY_COOKIE_GA or "GA1.1.1231997137.1778836345",
+    "_ga_QCGJL0F44F": RACEDAY_COOKIE_GA_QCGJL0F44F or "GS2.1.s1778836344$o1$g1$t1778838105$j26$l0$h0",
 }
 
 # ── Protobuf encoding ─────────────────────────────────────────────────────────
@@ -300,9 +305,13 @@ def _unframe(raw: bytes) -> bytes:
     """Extract first non-trailer gRPC-Web frame."""
     offset = 0
     while offset < len(raw):
+        if offset + 5 > len(raw):
+            raise ValueError("Incomplete gRPC-Web frame header")
         flags  = raw[offset]
         length = int.from_bytes(raw[offset + 1: offset + 5], "big")
         offset += 5
+        if offset + length > len(raw):
+            raise ValueError("Incomplete gRPC-Web frame payload")
         payload = raw[offset: offset + length]
         offset += length
         if not (flags & 0x80):   # 0x80 = trailer frame
@@ -316,9 +325,26 @@ _token_cache: dict[str, str | float] = {}
 
 
 def _decode_jwt_payload(token: str) -> dict[str, Any]:
-    segment = token.split(".")[1]
+    parts = token.split(".")
+    if len(parts) < 2 or not parts[1]:
+        raise ValueError("Invalid JWT format")
+    segment = parts[1]
     segment += "=" * (-len(segment) % 4)
-    return json.loads(base64.urlsafe_b64decode(segment).decode())
+    try:
+        decoded = base64.urlsafe_b64decode(segment).decode()
+        payload = json.loads(decoded)
+    except Exception as exc:
+        raise ValueError("Invalid JWT payload") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid JWT payload type")
+    return payload
+
+
+def _load_cached_json(raw: str, key: str) -> Any:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Corrupted cache entry for {key}") from exc
 
 
 async def _get_token(session: aiohttp.ClientSession) -> str:
@@ -328,14 +354,7 @@ async def _get_token(session: aiohttp.ClientSession) -> str:
 
     # Send email as field 1 plain string
     proto = _str(1, "anonymous@raceday.watch")
-    async with session.post(
-        f"{_BASE}/GetAccessToken",
-        data=_frame(proto),
-        headers=_HEADERS,
-        cookies=_COOKIES,
-    ) as resp:
-        resp.raise_for_status()
-        raw = await resp.read()
+    raw = await _post_raw(session, "GetAccessToken", proto)
 
     msg = _unframe(raw)
 
@@ -350,8 +369,10 @@ async def _get_token(session: aiohttp.ClientSession) -> str:
         raise ValueError("GetAccessToken returned no token")
 
     # AccessTokenID lives inside the JWT payload
-    payload     = _decode_jwt_payload(jwt_token)
-    token_id    = payload["AccessTokenID"]
+    payload = _decode_jwt_payload(jwt_token)
+    token_id = payload.get("AccessTokenID")
+    if not token_id or not isinstance(token_id, str):
+        raise ValueError("JWT payload missing AccessTokenID")
 
     _token_cache.update(token=token_id, expires=now + 3_600)
     log.debug("Token refreshed, ID: %s…", token_id[:8])
@@ -359,14 +380,34 @@ async def _get_token(session: aiohttp.ClientSession) -> str:
 
 
 async def _post(session: aiohttp.ClientSession, method: str, proto: bytes) -> bytes:
-    async with session.post(
-        f"{_BASE}/{method}",
-        data=_frame(proto),
-        headers=_HEADERS,
-        cookies=_COOKIES,
-    ) as resp:
-        resp.raise_for_status()
-        return _unframe(await resp.read())
+    return _unframe(await _post_raw(session, method, proto))
+
+
+async def _post_raw(session: aiohttp.ClientSession, method: str, proto: bytes) -> bytes:
+    last_exc: Exception | None = None
+    for cookies in (_COOKIES, None):
+        try:
+            async with session.post(
+                f"{_BASE}/{method}",
+                data=_frame(proto),
+                headers=_HEADERS,
+                cookies=cookies,
+            ) as resp:
+                resp.raise_for_status()
+                return await resp.read()
+        except aiohttp.ClientResponseError as exc:
+            last_exc = exc
+            if cookies is None or exc.status not in {400, 401, 403}:
+                raise
+            log.warning("Retrying %s without analytics cookies after HTTP %s", method, exc.status)
+        except Exception as exc:
+            last_exc = exc
+            if cookies is None:
+                raise
+            log.warning("Retrying %s without analytics cookies after transport error: %s", method, exc)
+    if last_exc is not None:
+        raise last_exc
+    raise ValueError(f"{method} request failed with no response")
 
 
 # ── Low-level fetchers ────────────────────────────────────────────────────────
@@ -434,9 +475,13 @@ async def _cached(
     raw = await db.get_cache(key, ttl)
     if raw is not None:
         log.debug("L2 hit: %s", key)
-        data = json.loads(raw)
-        mem.set(key, data, ttl)
-        return data
+        try:
+            data = _load_cached_json(raw, key)
+        except ValueError:
+            log.warning("Ignoring corrupted fresh cache entry for %s", key)
+        else:
+            mem.set(key, data, ttl)
+            return data
     log.info("API fetch: %s", key)
     try:
         if http_session is not None:
@@ -457,7 +502,7 @@ async def _cached(
         _fallback_stats["last_at"] = time.time()
         _fallback_stats["last_key"] = key
         log.warning("API fallback to stale cache for %s: %s", key, exc)
-        data = json.loads(stale_raw)
+        data = _load_cached_json(stale_raw, key)
         mem.set(key, data, min(ttl, 300))
         return data
 

@@ -113,6 +113,9 @@ async def test_notifications_job_uses_each_users_ui_language(monkeypatch) -> Non
         async def get_ignored_events(self, chat_id: int, now_ts: int):
             return []
 
+        async def has_pending_delivery(self, dedupe_key):
+            return False
+
     class FakeState:
         http_session = None
 
@@ -169,8 +172,6 @@ async def test_notifications_job_uses_each_users_ui_language(monkeypatch) -> Non
     monkeypatch.setattr(scheduler.utils, "get_live_timings", fake_get_live_timings)
     monkeypatch.setattr(scheduler.utils, "broadcasts_by_session", lambda rows: {})
     monkeypatch.setattr(scheduler, "_process_delivery", fake_process_delivery)
-    monkeypatch.setattr(scheduler.utils.delivery_queue, "has", lambda _key: False)
-
     await scheduler._notifications_job(
         bot=None,
         db=FakeDb(),

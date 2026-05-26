@@ -32,7 +32,7 @@ Telegram-бот для гоночного календаря `RaceDay.watch`. О
 
 ## Стек
 
-- Python 3.12+
+- Python 3.14+
 - `aiogram`
 - `aiohttp`
 - `aiosqlite`
@@ -191,4 +191,3 @@ database.py    слой работы с SQLite
 scheduler.py   фоновые jobs
 config.py      конфигурация и дефолты
 ```
-

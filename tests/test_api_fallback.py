@@ -75,3 +75,117 @@ async def test_cached_raises_when_no_stale_fallback_exists(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError):
         await api._cached("sessions:test", 3600, mem, db, lambda h, t: [])
+
+
+def test_unframe_rejects_incomplete_header() -> None:
+    with pytest.raises(ValueError, match="Incomplete gRPC-Web frame header"):
+        api._unframe(b"\x00\x00\x00")
+
+
+def test_unframe_rejects_incomplete_payload() -> None:
+    with pytest.raises(ValueError, match="Incomplete gRPC-Web frame payload"):
+        api._unframe(b"\x00\x00\x00\x00\x05abc")
+
+
+def test_decode_jwt_payload_rejects_invalid_token() -> None:
+    with pytest.raises(ValueError, match="Invalid JWT format"):
+        api._decode_jwt_payload("broken-token")
+
+
+@pytest.mark.asyncio
+async def test_cached_ignores_corrupted_fresh_cache_and_refetches(monkeypatch) -> None:
+    mem = MemoryCache()
+    db = _DummyDb(fresh="{broken", stale=None)
+
+    class _BrokenSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_client_session():
+        return _BrokenSession()
+
+    async def fake_get_token(_http):
+        return "token"
+
+    async def fake_fetch(_http, _token):
+        return [{"id": "session-2"}]
+
+    monkeypatch.setattr(api.aiohttp, "ClientSession", fake_client_session)
+    monkeypatch.setattr(api, "_get_token", fake_get_token)
+
+    data = await api._cached("sessions:test", 3600, mem, db, fake_fetch)
+
+    assert data == [{"id": "session-2"}]
+    assert db.saved == [("sessions:test", json.dumps([{"id": "session-2"}], ensure_ascii=False))]
+
+
+@pytest.mark.asyncio
+async def test_cached_raises_on_corrupted_stale_cache(monkeypatch) -> None:
+    mem = MemoryCache()
+    db = _DummyDb(stale="{broken")
+
+    class _BrokenSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_client_session():
+        return _BrokenSession()
+
+    async def fake_get_token(_http):
+        raise RuntimeError("api down")
+
+    monkeypatch.setattr(api.aiohttp, "ClientSession", fake_client_session)
+    monkeypatch.setattr(api, "_get_token", fake_get_token)
+
+    with pytest.raises(ValueError, match="Corrupted cache entry"):
+        await api._cached("sessions:test", 3600, mem, db, lambda h, t: [])
+
+
+@pytest.mark.asyncio
+async def test_post_raw_retries_without_cookies_on_auth_like_failure(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status: int, body: bytes) -> None:
+            self.status = status
+            self._body = body
+            self.request_info = None
+            self.history = ()
+
+        async def __aenter__(self):
+            if self.status >= 400:
+                raise api.aiohttp.ClientResponseError(
+                    self.request_info,
+                    self.history,
+                    status=self.status,
+                    message="boom",
+                )
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def read(self):
+            return self._body
+
+    class FakeSession:
+        def post(self, url, *, data, headers, cookies):
+            calls.append(cookies)
+            if len(calls) == 1:
+                return FakeResponse(403, b"")
+            return FakeResponse(200, b"ok")
+
+    raw = await api._post_raw(FakeSession(), "ListSeries", b"payload")
+
+    assert raw == b"ok"
+    assert calls[0] == api._COOKIES
+    assert calls[1] is None

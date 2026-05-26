@@ -162,6 +162,26 @@ def _retry_delay(attempt: int) -> int:
     return _RETRY_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1))
 
 
+async def _record_delivery_success(
+    db: Database,
+    metrics: Metrics,
+    item: utils.PendingDelivery,
+) -> None:
+    await asyncio.sleep(TELEGRAM_SEND_DELAY)
+    if item.kind == "notification" and item.session_id and item.notif_type:
+        await db.mark_notified_batch([(item.chat_id, item.session_id, item.notif_type)])
+        metrics.notifications_sent.inc()
+    elif item.kind == "digest" and item.digest_session_ids:
+        await db.mark_notified_batch(
+            [(item.chat_id, session_id, "digest") for session_id in item.digest_session_ids]
+        )
+        metrics.digests_sent.inc()
+    elif item.kind == "session_reminder" and item.session_id and item.remind_type:
+        await db.remove_session_reminder(item.chat_id, item.session_id, item.remind_type)
+        metrics.notifications_sent.inc()
+    log.info("Delivered %s → %d", item.kind, item.chat_id)
+
+
 async def _process_delivery(
     bot: Bot,
     db: Database,
@@ -173,19 +193,7 @@ async def _process_delivery(
     result = await utils.send_delivery(bot, item)
 
     if result.status == "success":
-        await asyncio.sleep(TELEGRAM_SEND_DELAY)
-        if item.kind == "notification" and item.session_id and item.notif_type:
-            await db.mark_notified_batch([(item.chat_id, item.session_id, item.notif_type)])
-            metrics.notifications_sent.inc()
-        elif item.kind == "digest" and item.digest_session_ids:
-            await db.mark_notified_batch(
-                [(item.chat_id, session_id, "digest") for session_id in item.digest_session_ids]
-            )
-            metrics.digests_sent.inc()
-        elif item.kind == "session_reminder" and item.session_id and item.remind_type:
-            await db.remove_session_reminder(item.chat_id, item.session_id, item.remind_type)
-            metrics.notifications_sent.inc()
-        log.info("Delivered %s → %d", item.kind, item.chat_id)
+        await _record_delivery_success(db, metrics, item)
         return True
 
     if result.status == "blocked":
@@ -199,7 +207,7 @@ async def _process_delivery(
     item.last_error = result.error
     if item.attempts <= _RETRY_MAX_ATTEMPTS and allow_queue:
         delay = result.retry_delay or _retry_delay(item.attempts)
-        queued = utils.delivery_queue.enqueue(item, delay_seconds=delay)
+        queued = await db.enqueue_pending_delivery(item, delay_seconds=delay)
         if queued:
             log.warning(
                 "Queued %s → %d for retry in %.0fs (attempt %d/%d): %s",
@@ -310,7 +318,7 @@ def _digest_due_now(now_ts: int, user: Row) -> bool:
 
 async def _retry_delivery_job(bot: Bot, db: Database, metrics: Metrics, state: RuntimeState) -> None:
     started_at = time.time()
-    due = utils.delivery_queue.pop_due()
+    due = await db.get_due_pending_deliveries(started_at)
     if not due:
         state.mark_job_success("retry_delivery", int((time.time() - started_at) * 1000))
         return
@@ -319,27 +327,16 @@ async def _retry_delivery_job(bot: Bot, db: Database, metrics: Metrics, state: R
     for item in due:
         result = await utils.send_delivery(bot, item)
         if result.status == "success":
-            await asyncio.sleep(TELEGRAM_SEND_DELAY)
-            if item.kind == "notification" and item.session_id and item.notif_type:
-                await db.mark_notified_batch([(item.chat_id, item.session_id, item.notif_type)])
-                metrics.notifications_sent.inc()
-            elif item.kind == "digest" and item.digest_session_ids:
-                await db.mark_notified_batch(
-                    [(item.chat_id, session_id, "digest") for session_id in item.digest_session_ids]
-                )
-                metrics.digests_sent.inc()
-            elif item.kind == "session_reminder" and item.session_id and item.remind_type:
-                await db.remove_session_reminder(item.chat_id, item.session_id, item.remind_type)
-                metrics.notifications_sent.inc()
-            elif item.kind == "broadcast":
+            await _record_delivery_success(db, metrics, item)
+            if item.kind == "broadcast":
                 log.info("Broadcast delivery retried successfully for %d", item.chat_id)
-            utils.delivery_queue.complete(item)
+            await db.complete_pending_delivery(item)
             continue
         if result.status == "blocked":
             await db.deactivate_user(item.chat_id)
             metrics.blocked_users.inc()
             metrics.record_error(item.kind, f"User {item.chat_id} blocked bot")
-            utils.delivery_queue.complete(item)
+            await db.complete_pending_delivery(item)
             continue
 
         item.attempts += 1
@@ -351,11 +348,11 @@ async def _retry_delivery_job(bot: Bot, db: Database, metrics: Metrics, state: R
                 "Delivery failed permanently for %s → %d after %d attempts: %s",
                 item.kind, item.chat_id, item.attempts, result.error,
             )
-            utils.delivery_queue.complete(item)
+            await db.complete_pending_delivery(item)
             continue
 
         delay = result.retry_delay or _retry_delay(item.attempts)
-        utils.delivery_queue.requeue(item, delay_seconds=delay)
+        await db.requeue_pending_delivery(item, delay_seconds=delay)
         log.warning(
             "Requeued %s → %d for retry in %.0fs (attempt %d/%d): %s",
             item.kind, item.chat_id, delay, item.attempts, _RETRY_MAX_ATTEMPTS, item.last_error,
@@ -408,7 +405,7 @@ async def _session_reminders_job(
         )
         event_identity = utils.build_event_identity(session, ui_lang)
         dedupe_key = ("session_reminder", chat_id, session_id, row["remind_type"])
-        if utils.delivery_queue.has(dedupe_key):
+        if await db.has_pending_delivery(dedupe_key):
             continue
         item = utils.PendingDelivery(
             kind="session_reminder",
@@ -558,7 +555,7 @@ async def _notifications_job(
         sid = session.get("id", "")
         kb = utils.notification_actions(sid, event["event_key"], False, False, ui_lang)
         dedupe_key = ("notification", chat_id, sid, notif_type)
-        if utils.delivery_queue.has(dedupe_key):
+        if await db.has_pending_delivery(dedupe_key):
             continue
         item = utils.PendingDelivery(
             kind="notification",
@@ -652,7 +649,7 @@ async def _rscg_notifications_job(
             ),
         ]])
         dedupe_key = ("notification", chat_id, session_id, notif_type)
-        if utils.delivery_queue.has(dedupe_key):
+        if await db.has_pending_delivery(dedupe_key):
             continue
         item = utils.PendingDelivery(
             kind="notification",
@@ -764,7 +761,7 @@ async def _weekly_digest_job(
                 lang=ui_lang,
             )
         dedupe_key = ("digest", chat_id, tuple(sorted(s["id"] for s in new_sessions)))
-        if utils.delivery_queue.has(dedupe_key):
+        if await db.has_pending_delivery(dedupe_key):
             continue
         item = utils.PendingDelivery(
             kind="digest",

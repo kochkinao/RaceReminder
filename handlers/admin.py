@@ -38,6 +38,10 @@ router = Router()
 
 # ── Guard filter ──────────────────────────────────────────────────────────────
 
+def _safe_admin_text(text: str) -> str:
+    return escape(text)
+
+
 def _is_admin(message: Message) -> bool:
     return message.from_user.id in ADMIN_IDS
 
@@ -92,7 +96,7 @@ def _build_broadcast_item(message: Message, batch_id: int, chat_id: int) -> util
         return utils.PendingDelivery(
             kind="broadcast",
             chat_id=chat_id,
-            text=body,
+            text=_safe_admin_text(body),
             parse_mode="HTML",
             dedupe_key=("broadcast", batch_id, chat_id),
         )
@@ -100,7 +104,7 @@ def _build_broadcast_item(message: Message, batch_id: int, chat_id: int) -> util
     return utils.PendingDelivery(
         kind="broadcast",
         chat_id=chat_id,
-        text=override_text or (source_text if source is not message else ""),
+        text=_safe_admin_text(override_text or (source_text if source is not message else "")),
         media_type=media_type,
         media_file_id=media_file_id,
         parse_mode="HTML",
@@ -124,7 +128,7 @@ def _build_admin_send_item(message: Message, batch_id: int) -> utils.PendingDeli
         return utils.PendingDelivery(
             kind="broadcast",
             chat_id=chat_id,
-            text=body,
+            text=_safe_admin_text(body),
             parse_mode="HTML",
             dedupe_key=("admin_send", message.from_user.id, chat_id, batch_id),
         )
@@ -132,7 +136,7 @@ def _build_admin_send_item(message: Message, batch_id: int) -> utils.PendingDeli
     return utils.PendingDelivery(
         kind="broadcast",
         chat_id=chat_id,
-        text=override_text or (source_text if source is not message else ""),
+        text=_safe_admin_text(override_text or (source_text if source is not message else "")),
         media_type=media_type,
         media_file_id=media_file_id,
         parse_mode="HTML",
@@ -252,6 +256,7 @@ async def _dashboard_text(
         _job_line("weekly_digest", "📆 Дайджест"),
         _job_line("rscg_notifications", "🏎️ РСКГ"),
     ])
+    retry_queue_size = await db.count_pending_deliveries()
 
     return (
         f"🛠 <b>Панель администратора</b>\n"
@@ -284,7 +289,7 @@ async def _dashboard_text(
         f"{scheduler_text}\n"
         f"\n"
         f"<b>📬 Retry queue</b>\n"
-        f"  В очереди: {utils.delivery_queue.size()}\n"
+        f"  В очереди: {retry_queue_size}\n"
     )
 
 
@@ -758,7 +763,7 @@ async def _run_admin_broadcast(message: Message, db: Database, metrics: Metrics)
             item.attempts = 1
             item.last_error = result.error
             delay = result.retry_delay or 60
-            if utils.delivery_queue.enqueue(item, delay_seconds=delay):
+            if await db.enqueue_pending_delivery(item, delay_seconds=delay):
                 queued += 1
             else:
                 failed += 1

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha1
 from html import escape
 
@@ -47,14 +47,22 @@ def _location_signature(session: dict, ui_lang: str = DEFAULT_UI_LANG) -> tuple[
     return location_slug or "track", location_name
 
 
+def _event_bucket_code(start_ts: int) -> str:
+    if not start_ts:
+        return "unknown-date"
+    # Shift by 3 days so Thu-Mon race weekends keep the same bucket.
+    shifted = datetime.fromtimestamp(start_ts, tz=timezone.utc) - timedelta(days=3)
+    iso_year, iso_week, _ = shifted.isocalendar()
+    return f"{iso_year}-W{iso_week:02d}"
+
+
 def build_event_identity(session: dict, ui_lang: str = DEFAULT_UI_LANG) -> EventIdentity:
     series_signature, series_label = _series_signature(session)
     location_slug, location_name = _location_signature(session, ui_lang)
 
     start_ts = int(session.get("start", 0) or 0)
     start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc) if start_ts else None
-    day_code = start_dt.strftime("%Y-%m-%d") if start_dt else "unknown-date"
-    raw_key = "|".join([series_signature, location_slug, day_code])
+    raw_key = "|".join([series_signature, location_slug, _event_bucket_code(start_ts)])
     key = sha1(raw_key.encode("utf-8")).hexdigest()[:16]
 
     if start_dt:
@@ -103,8 +111,7 @@ def group_sessions_by_event(
             _, location_name = _location_signature(first, ui_lang)
             starts = [int(item.get("start", 0) or 0) for item in cluster if item.get("start")]
             sort_ts = min(starts) if starts else 0
-            day_code = datetime.fromtimestamp(sort_ts, tz=timezone.utc).strftime("%Y-%m-%d") if sort_ts else "unknown-date"
-            raw_key = "|".join([series_signature, location_signature, day_code, str(len(cluster))])
+            raw_key = "|".join([series_signature, location_signature, _event_bucket_code(sort_ts)])
             key = sha1(raw_key.encode("utf-8")).hexdigest()[:16]
 
             if sort_ts:

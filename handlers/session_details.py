@@ -51,6 +51,40 @@ async def _load_events_index(
     return utils.group_sessions_by_event(sessions, ui_lang)
 
 
+async def _resolve_event_for_callback(
+    db: Database,
+    mem: MemoryCache,
+    http_session,
+    ui_lang: str,
+    event_key: str,
+    session_id: str = "",
+) -> tuple[str, dict | None]:
+    events_index = await _load_events_index(db, mem, http_session, ui_lang)
+    event = events_index.get(event_key)
+    if event:
+        return event_key, event
+
+    if not session_id:
+        return event_key, None
+
+    session_event_map = await _load_session_event_map(db, mem, http_session, ui_lang)
+    fallback_event = session_event_map.get(session_id)
+    if fallback_event:
+        return fallback_event["event_key"], fallback_event
+
+    session, _, _ = await utils.load_session_context(db, mem, http_session, session_id)
+    if not session:
+        return event_key, None
+
+    identity = utils.build_event_identity(session, ui_lang)
+    return identity.key, {
+        "event_key": identity.key,
+        "title": identity.title,
+        "sort_ts": identity.sort_ts,
+        "sessions": [session],
+    }
+
+
 async def _load_session_event_map(
     db: Database,
     mem: MemoryCache,
@@ -299,9 +333,14 @@ async def cb_event_action(
 ) -> None:
     user = await db.get_or_create_user(callback.from_user.id)
     lang = utils.get_ui_lang(user)
-    event_key = callback_data.event_key
-    events_index = await _load_events_index(db, mem, runtime_state.http_session, lang)
-    event = events_index.get(event_key)
+    event_key, event = await _resolve_event_for_callback(
+        db,
+        mem,
+        runtime_state.http_session,
+        lang,
+        callback_data.event_key,
+        callback_data.session_id,
+    )
     if not event:
         await callback.answer(utils.tr(lang, "event.not_found"), show_alert=True)
         return

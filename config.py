@@ -76,6 +76,9 @@ NOTIFICATION_OFFSETS: dict[str, int] = {
 }
 NOTIFICATION_WINDOW: int   = 1_800
 TELEGRAM_SEND_DELAY: float = 0.05   # 50 ms between sends → max 20 msg/sec (limit 30)
+TELEGRAM_DOCUMENT_MAX_BYTES: int = int(
+    os.getenv("TELEGRAM_DOCUMENT_MAX_BYTES", str(45 * 1024 * 1024))
+)
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 SCHEDULER_MISFIRE_GRACE: int = 600  # 10 min — job still runs if delayed

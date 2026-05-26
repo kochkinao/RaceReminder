@@ -15,22 +15,20 @@ import logging
 import time
 from datetime import datetime, timezone
 from html import escape
-from pathlib import Path
-import zipfile
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
-    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
 )
 
-from config import ADMIN_IDS, DATABASE_PATH, TELEGRAM_SEND_DELAY
+from config import ADMIN_IDS, TELEGRAM_SEND_DELAY
 from database import Database
 import utils
+from utils.backups import send_db_backup
 from utils.cache import MemoryCache
 from utils.metrics import Metrics
 
@@ -221,31 +219,6 @@ def _admin_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔃 Обновить",     callback_data="adm:refresh"),
         ],
     ])
-
-
-async def _send_db_backup(bot, admin_ids: set[int], db: Database) -> Path:
-    backup_dir = Path(DATABASE_PATH).parent / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / f"raceday-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.db"
-    archive_path = backup_path.with_suffix(".zip")
-    try:
-        await db.export_backup(str(backup_path))
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.write(backup_path, arcname=backup_path.name)
-
-        document = FSInputFile(str(archive_path), filename=archive_path.name)
-        caption = f"DB backup ZIP · {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}"
-        for admin_id in admin_ids:
-            await bot.send_document(admin_id, document=document, caption=caption)
-            await asyncio.sleep(TELEGRAM_SEND_DELAY)
-        return archive_path
-    finally:
-        for path in (backup_path, archive_path):
-            try:
-                if path.exists():
-                    path.unlink()
-            except Exception as cleanup_exc:
-                log.warning("Backup cleanup failed for %s: %s", path, cleanup_exc)
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -717,12 +690,20 @@ async def cb_backup(callback: CallbackQuery, db: Database) -> None:
         return
     await callback.answer("⏳ Готовлю архив БД...")
     try:
-        await _send_db_backup(callback.bot, {callback.from_user.id}, db)
+        parts_sent = await send_db_backup(
+            callback.bot,
+            {callback.from_user.id},
+            db,
+            caption_prefix="DB backup ZIP",
+        )
     except Exception as exc:
         log.error("Manual admin backup failed: %s", exc)
         await callback.message.answer(f"❌ Не удалось отправить БД: <code>{escape(str(exc)[:160])}</code>", parse_mode="HTML")
         return
-    await callback.message.answer("✅ Архив БД отправлен")
+    if parts_sent == 1:
+        await callback.message.answer("✅ Архив БД отправлен")
+    else:
+        await callback.message.answer(f"✅ Архив БД отправлен частями: {parts_sent} файлов")
 
 
 # ── Broadcast ─────────────────────────────────────────────────────────────────

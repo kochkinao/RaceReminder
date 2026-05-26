@@ -15,18 +15,17 @@ Scheduler jobs:
 import asyncio
 import json
 import logging
-from pathlib import Path
 import time
 from datetime import datetime, time as dt_time, timedelta, timezone
-import zipfile
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram import Bot
-from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 import pytz
 
-from config import ADMIN_IDS, DATABASE_PATH
+from config import ADMIN_IDS
 from database import Database
+from utils.backups import send_db_backup
 from utils.cache import MemoryCache
 from utils.health import RuntimeState
 from utils.metrics import Metrics
@@ -801,28 +800,14 @@ async def _admin_backup_job(bot: Bot, db: Database, state: RuntimeState) -> None
         state.mark_job_success("admin_backup", int((time.time() - started_at) * 1000))
         return
 
-    backup_dir = Path(DATABASE_PATH).parent / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / f"raceday-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.db"
-    archive_path = backup_path.with_suffix(".zip")
     try:
-        await db.export_backup(str(backup_path))
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.write(backup_path, arcname=backup_path.name)
-
-        document = FSInputFile(str(archive_path), filename=archive_path.name)
-        caption = f"Daily DB backup ZIP · {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}"
-        for admin_id in ADMIN_IDS:
-            await bot.send_document(admin_id, document=document, caption=caption)
-            await asyncio.sleep(TELEGRAM_SEND_DELAY)
+        await send_db_backup(
+            bot,
+            ADMIN_IDS,
+            db,
+            caption_prefix="Daily DB backup ZIP",
+        )
         state.mark_job_success("admin_backup", int((time.time() - started_at) * 1000))
     except Exception as exc:
         state.mark_job_failure("admin_backup", str(exc), int((time.time() - started_at) * 1000))
         log.error("Admin backup failed: %s", exc)
-    finally:
-        for path in (backup_path, archive_path):
-            try:
-                if path.exists():
-                    path.unlink()
-            except Exception as cleanup_exc:
-                log.warning("Backup cleanup failed for %s: %s", path, cleanup_exc)

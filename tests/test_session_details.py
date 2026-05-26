@@ -67,3 +67,33 @@ async def test_migrate_legacy_favorites_to_event_level() -> None:
     )
 
     assert fake_db.saved == [(1001, "event-42", "Formula Test · Imola · 01.06.2026", 1234)]
+
+
+async def test_resolve_event_for_callback_falls_back_to_session_id(monkeypatch) -> None:
+    current_event = {
+        "event_key": "current-event",
+        "title": "Formula Test · Imola · 01.06.2026",
+        "sort_ts": 1234,
+        "sessions": [{"id": "session-42", "name": "Race", "start": 1234}],
+    }
+
+    async def fake_load_events_index(db, mem, http_session, ui_lang):
+        return {"current-event": current_event}
+
+    async def fake_load_session_event_map(db, mem, http_session, ui_lang):
+        return {"session-42": current_event}
+
+    monkeypatch.setattr(session_details, "_load_events_index", fake_load_events_index)
+    monkeypatch.setattr(session_details, "_load_session_event_map", fake_load_session_event_map)
+
+    event_key, event = await session_details._resolve_event_for_callback(
+        db=None,
+        mem=None,
+        http_session=None,
+        ui_lang="ru",
+        event_key="stale-event",
+        session_id="session-42",
+    )
+
+    assert event_key == "current-event"
+    assert event == current_event

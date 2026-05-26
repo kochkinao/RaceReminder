@@ -235,6 +235,8 @@ async def _cache_warmup_job(mem: MemoryCache, db: Database, state: RuntimeState)
             state.mark_job_success("cache_warmup", int((time.time() - started_at) * 1000))
             _mark_scheduler_job_run(state, "cache_warmup")
             log.info("Cache warm-up done")
+        elif ok is None:
+            log.warning("Cache warm-up skipped: upstream API unavailable")
         else:
             state.mark_job_failure(
                 "cache_warmup", "warm-up failed", int((time.time() - started_at) * 1000)
@@ -441,6 +443,10 @@ async def _notifications_job(
         all_broadcasts = await utils.get_broadcasts(mem, db, state.http_session, n_start)
         metrics.api_requests.inc(2)
     except Exception as exc:
+        if utils.is_expected_api_failure(exc):
+            log.warning("Notification job skipped: upstream API unavailable: %s", exc)
+            metrics.api_errors.inc()
+            return
         state.mark_job_failure("notifications", str(exc), int((time.time() - t_start) * 1000))
         log.error("Notification job: API fetch failed: %s", exc)
         metrics.api_errors.inc()
@@ -685,6 +691,10 @@ async def _weekly_digest_job(
         all_broadcasts = await utils.get_broadcasts(mem, db, state.http_session, w_start)
         metrics.api_requests.inc(2)
     except Exception as exc:
+        if utils.is_expected_api_failure(exc):
+            log.warning("Weekly digest skipped: upstream API unavailable: %s", exc)
+            metrics.api_errors.inc()
+            return
         state.mark_job_failure("weekly_digest", str(exc), int((time.time() - t_start) * 1000))
         log.error("Weekly digest: API fetch failed: %s", exc)
         metrics.api_errors.inc()

@@ -2,6 +2,7 @@ from .api import (
     get_all_series, get_all_vehicle_classes,
     get_sessions, get_broadcasts, get_live_timings,
     broadcasts_by_session, filter_sessions_for_user, fallback_stats,
+    is_expected_api_failure,
     warm_up,
 )
 from .cache import MemoryCache
@@ -45,7 +46,7 @@ from .rscg import RscgStage, fetch_rscg_stages, get_rscg_stages, parse_dates
 __all__ = [
     "get_all_series", "get_all_vehicle_classes",
     "get_sessions", "get_broadcasts", "get_live_timings",
-    "broadcasts_by_session", "filter_sessions_for_user", "fallback_stats", "warm_up",
+    "broadcasts_by_session", "filter_sessions_for_user", "fallback_stats", "is_expected_api_failure", "warm_up",
     "MemoryCache",
     "PendingDelivery", "DeliveryResult", "delivery_queue", "send_delivery",
     "safe_edit_text", "safe_edit_reply_markup",

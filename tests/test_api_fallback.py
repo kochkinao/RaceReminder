@@ -1,6 +1,8 @@
 import json
+import socket
 
 import pytest
+from aiohttp import ClientConnectorError
 
 import utils.api as api
 from utils.cache import MemoryCache
@@ -92,6 +94,16 @@ def test_decode_jwt_payload_rejects_invalid_token() -> None:
         api._decode_jwt_payload("broken-token")
 
 
+def test_is_expected_api_failure_matches_dns_errors() -> None:
+    exc = ClientConnectorError(None, socket.gaierror(socket.EAI_NONAME, "Name or service not known"))
+
+    assert api.is_expected_api_failure(exc) is True
+
+
+def test_is_expected_api_failure_rejects_generic_errors() -> None:
+    assert api.is_expected_api_failure(RuntimeError("boom")) is False
+
+
 @pytest.mark.asyncio
 async def test_cached_ignores_corrupted_fresh_cache_and_refetches(monkeypatch) -> None:
     mem = MemoryCache()
@@ -145,6 +157,19 @@ async def test_cached_raises_on_corrupted_stale_cache(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="Corrupted cache entry"):
         await api._cached("sessions:test", 3600, mem, db, lambda h, t: [])
+
+
+@pytest.mark.asyncio
+async def test_warm_up_returns_none_on_expected_api_failure(monkeypatch) -> None:
+    mem = MemoryCache()
+    db = _DummyDb()
+
+    async def fake_get_sessions(*_args, **_kwargs):
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(api, "get_sessions", fake_get_sessions)
+
+    assert await api.warm_up(mem, db, object()) is None
 
 
 @pytest.mark.asyncio

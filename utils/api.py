@@ -14,9 +14,11 @@ Key differences from initial implementation:
   8. Location: 13 fields including alternateName, trackMap, regionName
   9. window_start encoded as plain int64 (field 1), not wrapped
 """
+import asyncio
 import base64
 import json
 import logging
+import socket
 import struct
 import time
 from datetime import UTC, datetime
@@ -347,6 +349,14 @@ def _load_cached_json(raw: str, key: str) -> Any:
         raise ValueError(f"Corrupted cache entry for {key}") from exc
 
 
+def is_expected_api_failure(exc: BaseException) -> bool:
+    if isinstance(exc, (aiohttp.ClientConnectionError, asyncio.TimeoutError)):
+        return True
+    if isinstance(exc, OSError):
+        return isinstance(exc, socket.gaierror)
+    return False
+
+
 async def _get_token(session: aiohttp.ClientSession) -> str:
     now = time.time()
     if float(_token_cache.get("expires", 0)) > now + 60:
@@ -581,7 +591,7 @@ async def get_live_timings(
 
 # ── Warm-up ───────────────────────────────────────────────────────────────────
 
-async def warm_up(mem: MemoryCache, db: Database, http_session: aiohttp.ClientSession) -> bool:
+async def warm_up(mem: MemoryCache, db: Database, http_session: aiohttp.ClientSession) -> bool | None:
     from utils.windows import today_window, week_window, notify_window
 
     log.info("Cache warm-up started")
@@ -603,6 +613,9 @@ async def warm_up(mem: MemoryCache, db: Database, http_session: aiohttp.ClientSe
         return True
 
     except Exception as exc:
+        if is_expected_api_failure(exc):
+            log.warning("Warm-up skipped: upstream API unavailable: %s", exc)
+            return None
         log.error("Warm-up failed: %s", exc)
         return False
 

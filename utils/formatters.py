@@ -344,7 +344,7 @@ def build_digest(
             continue
         day_heading = ""
         if s.get("start"):
-            session_day = _local_day_label(s["start"], user_tz)
+            session_day = _local_day_label(s["start"], user_tz, ui_lang)
             if session_day != current_day:
                 current_day = session_day
                 day_heading = f"\n\n<b>{session_day}</b>\n"

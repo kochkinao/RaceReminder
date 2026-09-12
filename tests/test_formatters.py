@@ -79,6 +79,21 @@ def test_build_digest_splits_long_messages() -> None:
     assert all(len(message) <= 3800 for message in messages)
 
 
+def test_build_digest_uses_english_day_headings_when_ui_lang_is_english() -> None:
+    messages = utils.build_digest(
+        sessions=[_session()],
+        broadcasts_map={},
+        timings_map={},
+        user_tz="Europe/Moscow",
+        user_langs=["English"],
+        header="Header",
+        ui_lang="en",
+    )
+
+    assert "<b>Mon," in messages[0]
+    assert "<b>пн," not in messages[0]
+
+
 def test_notification_text_uses_label_and_card() -> None:
     text = utils.notification_text(
         _session(),

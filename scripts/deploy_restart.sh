@@ -11,11 +11,18 @@ LOG_FILE="$LOG_DIR/deploy_restart.log"
 mkdir -p "$LOG_DIR"
 exec >>"$LOG_FILE" 2>&1
 
+LOCK_DIR="$LOG_DIR/deploy_restart.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  printf '[%s] deploy restart skipped: another deploy is already running\n' "$(date -Is)"
+  exit 0
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
 printf '\n[%s] deploy restart started\n' "$(date -Is)"
 cd "$REPO_DIR"
 
 git fetch origin "$BRANCH"
-git pull --ff-only origin "$BRANCH"
+git merge --ff-only "origin/$BRANCH"
 
 if [ ! -x .venv/bin/python ]; then
   if command -v uv >/dev/null 2>&1; then

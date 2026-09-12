@@ -60,6 +60,7 @@ CHANNEL_ID=
 CHANNEL_LINK=
 LIVE_TIMING_CACHE_TTL=60
 ADMIN_RESTART_COMMAND=
+DEPLOY_WATCH_INTERVAL=60
 ```
 
 Запуск:
@@ -96,7 +97,12 @@ pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
 ```
 
-Для ручного обновления из Telegram задайте в `.env`:
+`ecosystem.config.cjs` запускает два PM2-процесса:
+
+- `race-reminder-bot` — сам Telegram-бот;
+- `race-reminder-deploy-watch` — poller, который раз в `DEPLOY_WATCH_INTERVAL` секунд проверяет `origin/main`; если появился новый commit, выполняет `scripts/deploy_restart.sh` и перезапускает только bot-процесс.
+
+Для ручного обновления из Telegram дополнительно задайте в `.env`:
 
 ```env
 ADMIN_RESTART_COMMAND=/home/<user>/RaceReminder/scripts/deploy_restart.sh

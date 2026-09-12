@@ -4,7 +4,7 @@ set -Eeuo pipefail
 APP_NAME="${APP_NAME:-race-reminder-bot}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 BRANCH="${BRANCH:-main}"
-PYTHON_BIN="${PYTHON_BIN:-python3.14}"
+PYTHON_BIN="${PYTHON_BIN:-3.14}"
 LOG_DIR="$REPO_DIR/logs"
 LOG_FILE="$LOG_DIR/deploy_restart.log"
 
@@ -18,10 +18,18 @@ git fetch origin "$BRANCH"
 git pull --ff-only origin "$BRANCH"
 
 if [ ! -x .venv/bin/python ]; then
-  "$PYTHON_BIN" -m venv .venv
+  if command -v uv >/dev/null 2>&1; then
+    uv venv --python "$PYTHON_BIN" --seed .venv
+  else
+    "$PYTHON_BIN" -m venv .venv
+  fi
 fi
 
-.venv/bin/python -m pip install -r requirements.txt
+if command -v uv >/dev/null 2>&1; then
+  uv pip install --python .venv/bin/python -r requirements.txt
+else
+  .venv/bin/python -m pip install -r requirements.txt
+fi
 .venv/bin/pytest -q
 
 mkdir -p data logs

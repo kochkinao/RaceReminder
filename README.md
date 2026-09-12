@@ -91,8 +91,8 @@ Runtime-файлы монтируются с хоста:
 На сервере можно запускать бот через PM2:
 
 ```bash
-python3.14 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+uv venv --python 3.14 --seed .venv
+uv pip install --python .venv/bin/python -r requirements.txt
 pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
 ```

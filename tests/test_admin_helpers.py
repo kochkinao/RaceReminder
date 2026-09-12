@@ -37,3 +37,15 @@ def test_build_admin_send_item_escapes_text_payload() -> None:
 
     assert item.chat_id == 123
     assert item.text == "&lt;b&gt;unsafe&lt;/b&gt;"
+
+
+def test_admin_restart_command_is_disabled_without_env(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "ADMIN_RESTART_COMMAND", "")
+
+    assert admin._admin_restart_command() is None
+
+
+def test_admin_restart_command_strips_env_value(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "ADMIN_RESTART_COMMAND", "  ./scripts/deploy_restart.sh  ")
+
+    assert admin._admin_restart_command() == "./scripts/deploy_restart.sh"

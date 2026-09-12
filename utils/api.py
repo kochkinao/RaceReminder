@@ -29,6 +29,7 @@ import aiohttp
 from config import (
     API_BASE_URL,
     API_FALLBACK_STALE_SECONDS,
+    LIVE_TIMING_CACHE_TTL,
     RACEDAY_COOKIE_GA,
     RACEDAY_COOKIE_GA_QCGJL0F44F,
 )
@@ -324,6 +325,11 @@ def _unframe(raw: bytes) -> bytes:
 # ── Token management ──────────────────────────────────────────────────────────
 
 _token_cache: dict[str, str | float] = {}
+_live_timing_cache: dict[str, tuple[float, list[ApiObject]]] = {}
+
+
+def clear_live_timing_cache() -> None:
+    _live_timing_cache.clear()
 
 
 def _decode_jwt_payload(token: str) -> dict[str, Any]:
@@ -581,12 +587,21 @@ async def get_live_timings(
     session_id: str,
     http_session: aiohttp.ClientSession | None = None,
 ) -> list[ApiObject]:
+    now = time.time()
+    cached = _live_timing_cache.get(session_id)
+    if cached and cached[0] > now:
+        return cached[1]
+
     if http_session is not None:
         tok = await _get_token(http_session)
-        return await _fetch_live_timings(http_session, tok, session_id)
+        data = await _fetch_live_timings(http_session, tok, session_id)
+        _live_timing_cache[session_id] = (now + LIVE_TIMING_CACHE_TTL, data)
+        return data
     async with aiohttp.ClientSession() as session:
         tok = await _get_token(session)
-        return await _fetch_live_timings(session, tok, session_id)
+        data = await _fetch_live_timings(session, tok, session_id)
+        _live_timing_cache[session_id] = (now + LIVE_TIMING_CACHE_TTL, data)
+        return data
 
 
 # ── Warm-up ───────────────────────────────────────────────────────────────────

@@ -105,6 +105,29 @@ def test_is_expected_api_failure_rejects_generic_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_live_timings_uses_short_ttl_cache(monkeypatch) -> None:
+    calls = []
+
+    async def fake_get_token(_http):
+        return "token"
+
+    async def fake_fetch_live_timings(_http, _token, session_id: str):
+        calls.append(session_id)
+        return [{"sessionId": session_id, "url": f"https://example.com/{len(calls)}"}]
+
+    monkeypatch.setattr(api, "_get_token", fake_get_token)
+    monkeypatch.setattr(api, "_fetch_live_timings", fake_fetch_live_timings)
+    monkeypatch.setattr(api, "LIVE_TIMING_CACHE_TTL", 60)
+    api.clear_live_timing_cache()
+
+    first = await api.get_live_timings("session-1", http_session=object())
+    second = await api.get_live_timings("session-1", http_session=object())
+
+    assert first == second
+    assert calls == ["session-1"]
+
+
+@pytest.mark.asyncio
 async def test_cached_ignores_corrupted_fresh_cache_and_refetches(monkeypatch) -> None:
     mem = MemoryCache()
     db = _DummyDb(fresh="{broken", stale=None)

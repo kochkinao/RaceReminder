@@ -8,8 +8,10 @@ Commands:
   /admin_cache    — cache status + clear
   /admin_errors   — recent errors from metrics
   /admin_broadcast <text> — send message to all active users
+  /restart       — run configured deploy/restart command
 """
 import asyncio
+import subprocess
 import json
 import logging
 import time
@@ -25,7 +27,7 @@ from aiogram.types import (
     Message,
 )
 
-from config import ADMIN_IDS, TELEGRAM_SEND_DELAY
+from config import ADMIN_IDS, ADMIN_RESTART_COMMAND, TELEGRAM_SEND_DELAY
 from database import Database
 import utils
 from utils.backups import send_db_backup
@@ -44,6 +46,21 @@ def _safe_admin_text(text: str) -> str:
 
 def _is_admin(message: Message) -> bool:
     return message.from_user.id in ADMIN_IDS
+
+
+def _admin_restart_command() -> str | None:
+    command = ADMIN_RESTART_COMMAND.strip()
+    return command or None
+
+
+async def _spawn_restart_command(command: str) -> int:
+    process = await asyncio.create_subprocess_shell(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return process.pid or 0
 
 
 def _user_kb(chat_id: int, is_active: bool = True) -> InlineKeyboardMarkup:
@@ -301,6 +318,28 @@ async def cmd_admin(
         return
     text = await _dashboard_text(db, mem, metrics, runtime_state)
     await message.answer(text, parse_mode="HTML", reply_markup=_admin_kb())
+
+
+@router.message(Command("restart"))
+async def cmd_restart(message: Message) -> None:
+    if not _is_admin(message):
+        return
+    command = _admin_restart_command()
+    if command is None:
+        await message.answer(
+            "⚠️ <b>Restart не настроен</b>\n\n"
+            "Задайте <code>ADMIN_RESTART_COMMAND</code> в <code>.env</code> на сервере.",
+            parse_mode="HTML",
+        )
+        return
+    await message.answer(
+        "🔄 <b>Перезапуск запущен</b>\n\n"
+        "Сейчас подтяну изменения и перезапущу процесс. "
+        "Бот может быть недоступен несколько секунд.",
+        parse_mode="HTML",
+    )
+    pid = await _spawn_restart_command(command)
+    log.warning("Admin %d spawned restart command pid=%s", message.from_user.id, pid)
 
 
 @router.callback_query(F.data == "adm:refresh")

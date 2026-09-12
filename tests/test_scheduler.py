@@ -110,8 +110,8 @@ async def test_notifications_job_uses_each_users_ui_language(monkeypatch) -> Non
         async def get_all_sent_notifications(self):
             return set()
 
-        async def get_ignored_events(self, chat_id: int, now_ts: int):
-            return []
+        async def get_all_ignored_events(self, now_ts: int):
+            return {}
 
         async def has_pending_delivery(self, dedupe_key):
             return False

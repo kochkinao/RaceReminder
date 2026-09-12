@@ -460,6 +460,7 @@ async def _notifications_job(
     all_users  = await db.get_all_users(active_only=True)
     all_subs   = await db.get_all_subscriptions()
     sent_set   = await db.get_all_sent_notifications()
+    ignored_by_chat = await db.get_all_ignored_events(now)
     users_by_chat_id = {user["chat_id"]: user for user in all_users}
 
     series_idx, class_idx = _build_session_index(all_sessions)
@@ -473,10 +474,7 @@ async def _notifications_job(
         subs       = all_subs.get(chat_id, [])
         if not subs:
             continue
-        ignored_keys = {
-            row["event_key"]
-            for row in await db.get_ignored_events(chat_id, now)
-        }
+        ignored_keys = ignored_by_chat.get(chat_id, set())
 
         series_ids = {s["ref_id"] for s in subs if s["type"] == "series"}
         class_ids  = {s["ref_id"] for s in subs if s["type"] == "vehicle_class"}
@@ -521,7 +519,7 @@ async def _notifications_job(
                         live_timings_cache[sid] = await utils.get_live_timings(sid, state.http_session)
                     except Exception as exc:
                         log.warning("Live timings fetch failed for %s: %s", sid, exc)
-                    live_timings_cache[sid] = []
+                        live_timings_cache[sid] = []
 
                 to_send.append((
                     user,

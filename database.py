@@ -628,6 +628,23 @@ class Database:
         sql += " ORDER BY sort_ts DESC, created_at DESC"
         return await self._fetchall(sql, tuple(params))
 
+    async def get_all_ignored_events(self, now_ts: int | None = None) -> dict[int, set[str]]:
+        """Return active ignored event keys grouped by chat_id for scheduler batch jobs."""
+        sql = (
+            "SELECT ie.chat_id, ie.event_key FROM ignored_events ie "
+            "JOIN users u ON u.chat_id=ie.chat_id "
+            "WHERE u.is_active=1"
+        )
+        params: list[Any] = []
+        if now_ts is not None:
+            sql += " AND ie.expires_at_ts>?"
+            params.append(now_ts)
+        rows = await self._fetchall(sql, tuple(params))
+        grouped: dict[int, set[str]] = {}
+        for row in rows:
+            grouped.setdefault(row["chat_id"], set()).add(row["event_key"])
+        return grouped
+
     async def is_event_ignored(self, chat_id: int, event_key: str, now_ts: int | None = None) -> bool:
         sql = "SELECT 1 FROM ignored_events WHERE chat_id=? AND event_key=?"
         params: list[Any] = [chat_id, event_key]

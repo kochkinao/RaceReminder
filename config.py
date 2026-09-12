@@ -7,9 +7,10 @@ load_dotenv()
 # ── Core ──────────────────────────────────────────────────────────────────────
 BOT_TOKEN: str     = os.getenv("BOT_TOKEN", "")
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", "data/raceday.db")
-API_BASE_URL: str  = os.getenv("API_BASE_URL", "https://api.raceday.watch")
+API_BASE_URL: str  = os.getenv("API_BASE_URL", "https://raceday.watch/api")
 LOG_LEVEL: str     = os.getenv("LOG_LEVEL", "INFO")
 API_FALLBACK_STALE_SECONDS: int = int(os.getenv("API_FALLBACK_STALE_SECONDS", str(7 * 24 * 3600)))
+LIVE_TIMING_CACHE_TTL: int = int(os.getenv("LIVE_TIMING_CACHE_TTL", "60"))
 RACEDAY_COOKIE_GA: str | None = os.getenv("RACEDAY_COOKIE_GA") or None
 RACEDAY_COOKIE_GA_QCGJL0F44F: str | None = os.getenv("RACEDAY_COOKIE_GA_QCGJL0F44F") or None
 
@@ -81,6 +82,7 @@ TELEGRAM_SEND_DELAY: float = 0.05   # 50 ms between sends → max 20 msg/sec (li
 TELEGRAM_DOCUMENT_MAX_BYTES: int = int(
     os.getenv("TELEGRAM_DOCUMENT_MAX_BYTES", str(45 * 1024 * 1024))
 )
+ADMIN_RESTART_COMMAND: str = os.getenv("ADMIN_RESTART_COMMAND", "")
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 SCHEDULER_MISFIRE_GRACE: int = 600  # 10 min — job still runs if delayed

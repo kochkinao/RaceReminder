@@ -55,9 +55,11 @@ BOT_TOKEN=...
 ADMIN_IDS=123456789,987654321
 DATABASE_PATH=data/raceday.db
 LOG_LEVEL=INFO
-API_BASE_URL=https://api.raceday.watch
+API_BASE_URL=https://raceday.watch/api
 CHANNEL_ID=
 CHANNEL_LINK=
+LIVE_TIMING_CACHE_TTL=60
+ADMIN_RESTART_COMMAND=
 ```
 
 Запуск:
@@ -65,6 +67,42 @@ CHANNEL_LINK=
 ```bash
 python main.py
 ```
+
+## Docker
+
+Локальный запуск через Docker Compose:
+
+```bash
+cp .env.example .env
+# заполните BOT_TOKEN и ADMIN_IDS
+docker compose up --build
+```
+
+Runtime-файлы монтируются с хоста:
+
+- `./data` → SQLite база, WAL и backup-архивы
+- `./logs` → место под файловые логи, если они будут включены
+
+Для одного процесса бот по-прежнему использует SQLite WAL. Redis/PostgreSQL не нужны для локальной разработки и небольшого продакшн-запуска; их стоит добавлять при нескольких воркерах/репликах или заметном росте нагрузки.
+
+## PM2 deploy
+
+На сервере можно запускать бот через PM2:
+
+```bash
+python3.14 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+pm2 startOrReload ecosystem.config.cjs --update-env
+pm2 save
+```
+
+Для ручного обновления из Telegram задайте в `.env`:
+
+```env
+ADMIN_RESTART_COMMAND=/home/<user>/RaceReminder/scripts/deploy_restart.sh
+```
+
+После этого админская команда `/restart` выполнит `git pull --ff-only`, обновит зависимости и перезапустит PM2-процесс.
 
 ## Основные команды
 
@@ -74,6 +112,7 @@ python main.py
 - `/week` - недельный обзор
 - `/favorites` - избранные уикенды
 - `/admin` - админ-панель
+- `/restart` - подтянуть изменения и перезапустить PM2-процесс (только админ, если задан `ADMIN_RESTART_COMMAND`)
 - `/admin_user CHAT_ID` - карточка пользователя
 - `/admin_broadcast ...` - массовая рассылка
 - `/admin_send CHAT_ID ...` - отправка сообщения одному пользователю

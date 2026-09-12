@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass
 from datetime import date
 
@@ -77,21 +78,24 @@ def parse_dates(dates_str: str, year: int) -> tuple[date, date]:
     return date(year, month, start_day), date(year, month, end_day)
 
 
-def _extract_stages_payload(html: str) -> list[dict]:
-    marker = '\\"stages\\":[{'
-    start = html.find(marker)
-    if start < 0:
-        raise ValueError("RSCG stages marker not found")
+def _decode_next_flight_chunks(html: str) -> list[str]:
+    chunks: list[str] = []
+    for match in re.finditer(r"<script>self\.__next_f\.push\((.*?)\)</script>", html, re.S):
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if len(payload) > 1 and isinstance(payload[1], str):
+            chunks.append(payload[1])
+    return chunks
 
-    array_start = html.find("[", start)
-    if array_start < 0:
-        raise ValueError("RSCG stages array start not found")
 
+def _parse_json_array_at(text: str, array_start: int) -> list[dict]:
     depth = 0
     in_string = False
     escaped = False
-    for idx in range(array_start, len(html)):
-        char = html[idx]
+    for idx in range(array_start, len(text)):
+        char = text[idx]
         if in_string:
             if escaped:
                 escaped = False
@@ -110,17 +114,34 @@ def _extract_stages_payload(html: str) -> list[dict]:
         if char == "]":
             depth -= 1
             if depth == 0:
-                raw = html[array_start:idx + 1]
-                decoded = (
-                    raw.replace('\\"', '"')
-                    .replace("\\/", "/")
-                    .replace("\\n", "\n")
-                    .replace("\\t", "\t")
-                )
-                payload, _ = json.JSONDecoder().raw_decode(decoded)
+                payload = json.loads(text[array_start:idx + 1])
+                if not isinstance(payload, list):
+                    raise ValueError("RSCG stages payload is not a list")
                 return payload
-
     raise ValueError("RSCG stages array end not found")
+
+
+def _extract_stages_payload(html: str) -> list[dict]:
+    # The calendar is a Next.js app. The useful data is embedded inside
+    # self.__next_f.push([1, "..."]) flight chunks. Decode the outer JSON string
+    # first; manual replacement of \" corrupts values containing escaped quotes.
+    for chunk in _decode_next_flight_chunks(html):
+        marker = '"stages":[{'
+        start = chunk.find(marker)
+        if start < 0:
+            continue
+        array_start = chunk.find("[", start)
+        if array_start >= 0:
+            return _parse_json_array_at(chunk, array_start)
+
+    marker = '"stages":[{'
+    start = html.find(marker)
+    if start >= 0:
+        array_start = html.find("[", start)
+        if array_start >= 0:
+            return _parse_json_array_at(html, array_start)
+
+    raise ValueError("RSCG stages marker not found")
 
 
 def _clean_optional(value: object) -> str | None:

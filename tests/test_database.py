@@ -145,6 +145,26 @@ async def test_event_favorites_and_ignored_events(db: database.Database) -> None
 
 
 @pytest.mark.asyncio
+async def test_get_all_ignored_events_groups_active_unexpired_events(db: database.Database) -> None:
+    await db.create_user(1001, "u1")
+    await db.create_user(1002, "u2")
+    await db.create_user(1003, "u3")
+    await db.deactivate_user(1003)
+
+    await db.ignore_event(1001, "event-active-1", "Active 1", 100, 5000)
+    await db.ignore_event(1001, "event-expired", "Expired", 100, 900)
+    await db.ignore_event(1002, "event-active-2", "Active 2", 200, 6000)
+    await db.ignore_event(1003, "event-inactive-user", "Inactive", 300, 6000)
+
+    grouped = await db.get_all_ignored_events(now_ts=1000)
+
+    assert grouped == {
+        1001: {"event-active-1"},
+        1002: {"event-active-2"},
+    }
+
+
+@pytest.mark.asyncio
 async def test_pending_deliveries_crud(db: database.Database) -> None:
     item = utils.PendingDelivery(
         kind="notification",

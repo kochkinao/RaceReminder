@@ -1,6 +1,15 @@
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 import scheduler
+
+
+def test_scheduler_does_not_send_automatic_database_backups() -> None:
+    jobs = scheduler.make_scheduler(Mock(), Mock(), Mock(), Mock(), Mock()).get_jobs()
+    assert {job.id for job in jobs} == {
+        "cache_warmup", "notifications", "weekly_digest", "db_cleanup",
+        "retry_delivery", "session_reminders", "rscg_notifications",
+    }
 
 
 def _session(name: str = "Main Race") -> dict:

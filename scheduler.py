@@ -23,9 +23,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 import pytz
 
-from config import ADMIN_IDS
 from database import Database
-from utils.backups import send_db_backup
 from utils.cache import MemoryCache
 from utils.health import RuntimeState
 from utils.metrics import Metrics
@@ -102,12 +100,6 @@ def make_scheduler(
         args=(bot, db, mem, metrics, state),
         trigger="cron", hour="*", minute=10,
         id="rscg_notifications", replace_existing=True, **grace,
-    )
-    scheduler.add_job(
-        _admin_backup_job,
-        args=(bot, db, state),
-        trigger="cron", hour=1, minute=30,
-        id="admin_backup", replace_existing=True, **grace,
     )
 
     return scheduler
@@ -797,22 +789,3 @@ async def _db_cleanup_job(db: Database, state: RuntimeState) -> None:
     deleted += await db.cleanup_expired_ignored_events(int(started_at))
     state.mark_job_success("db_cleanup", int((time.time() - started_at) * 1000))
     log.info("DB cleanup: %d old sent_notifications removed", deleted)
-
-
-async def _admin_backup_job(bot: Bot, db: Database, state: RuntimeState) -> None:
-    started_at = time.time()
-    if not ADMIN_IDS:
-        state.mark_job_success("admin_backup", int((time.time() - started_at) * 1000))
-        return
-
-    try:
-        await send_db_backup(
-            bot,
-            ADMIN_IDS,
-            db,
-            caption_prefix="Daily DB backup ZIP",
-        )
-        state.mark_job_success("admin_backup", int((time.time() - started_at) * 1000))
-    except Exception as exc:
-        state.mark_job_failure("admin_backup", str(exc), int((time.time() - started_at) * 1000))
-        log.error("Admin backup failed: %s", exc)

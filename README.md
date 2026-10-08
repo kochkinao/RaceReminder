@@ -194,7 +194,7 @@ RaceDay.watch не отдаёт явный `event_id`. Поэтому бот с�
 - `retry_delivery` — повторяет временно неудачные доставки.
 - `rscg_notifications` — уведомляет о ближайших этапах СМП РСКГ.
 - `db_cleanup` — чистит старые технические записи.
-- `admin_backup` — отправляет zip-backup SQLite базы администраторам.
+Автоматическая отправка базы в Telegram отключена. Ручной backup доступен в админ-панели.
 
 ### Уведомления
 
@@ -574,7 +574,7 @@ Main jobs:
 - `retry_delivery` — retries temporary delivery failures.
 - `rscg_notifications` — sends SMP RSKG reminders.
 - `db_cleanup` — removes old technical records.
-- `admin_backup` — sends zipped SQLite backups to admins.
+Automatic database uploads to Telegram are disabled. Manual backups remain available in the admin dashboard.
 
 ### Notifications
 

@@ -35,6 +35,17 @@ class AdminAlertHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            # Polling retries these resets automatically. Keep the console log,
+            # but do not turn each reconnect into a Telegram admin alert.
+            message = record.getMessage()
+            if (
+                record.levelno == logging.ERROR
+                and record.name == "aiogram.dispatcher"
+                and message.startswith("Failed to fetch updates - TelegramNetworkError:")
+                and "Connection reset by peer" in message
+            ):
+                return
+
             ts  = datetime.now(timezone.utc).strftime("%H:%M:%S")
             lvl = record.levelname
             msg = self.format(record)
